@@ -1,0 +1,254 @@
+{
+  "allDbs": [
+    "materix-crypto-879f0b1f4508abc2::matrix-sdk-crypto",
+    "materix-crypto-879f0b1f4508abc2::matrix-sdk-crypto-meta",
+    "materix-decrypted-879f0b1f4508abc2",
+    "matrix-js-sdk:materix-sync-879f0b1f4508abc2"
+  ],
+  "cacheDb": "materix-decrypted-879f0b1f4508abc2",
+  "rowCount": 24,
+  "rows": [
+    {
+      "eventId": "$41Ep32YzlmD7KVfhrRjmlkFjYA7IMFsc9Z1UMY-PbzI",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-009"
+    },
+    {
+      "eventId": "$A-0300ki8Ex4zDYLXtz0TJTGMpFIxJxyNPT0lZCfIe8",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-022"
+    },
+    {
+      "eventId": "$FEgNL0DgsVu_ohLPSA8YZzoyND8VUlNUpT-K28o_1Ck",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-011"
+    },
+    {
+      "eventId": "$MlYi2N7Pxc7s5o7LDXtOWejmTORlZp6IrSH5UF0bpvQ",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-012"
+    },
+    {
+      "eventId": "$NZHbkDv0Ff5lj67M37WWWERF3FBfKO8pA5AdDzmfeCo",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-004"
+    },
+    {
+      "eventId": "$Nnea0LqI1tkpF4WNr8lMeiZTHREEB0GMYIf-MgoXFi8",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-002"
+    },
+    {
+      "eventId": "$O1-eF3_Kt4oKMLIk_ycTyRFwIdGhFdpfLMxAUwxU2SY",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-010"
+    },
+    {
+      "eventId": "$Onlr-mDJFbZ-YaCNH-kMKR6olNaH5jKt0oaRAFFaFZs",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-024"
+    },
+    {
+      "eventId": "$YvpAFZNJbTuQFEV2mrUazxdWFcwCFTV3ow0L6mifuDg",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-016"
+    },
+    {
+      "eventId": "$Z4A-yK81CggsHxF93EOWo6pt23vfzV-E7bpZinsB_E8",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-003"
+    },
+    {
+      "eventId": "$a7vEmTh-vEG1MZeK_rFB-Y9Y8Uq0j6I7UDkE5m-rZq4",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-007"
+    },
+    {
+      "eventId": "$fAbp_OPxCeWbwck7219dSxq2uSWMTOYjs2qcL4hRcwY",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-013"
+    },
+    {
+      "eventId": "$ifdrY-Y7fb4zyFi-7yVy4gjmvF9SjP-MRMLtOKaShCI",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-006"
+    },
+    {
+      "eventId": "$jo_gw06j0TlbDPxCtSnj_JmvQqxvSBbCLe-JxivzeYw",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-018"
+    },
+    {
+      "eventId": "$kHcyA_FfSGAzEXm4tXEYSFvBspt1VrA-uv_Vyhf44fU",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-015"
+    },
+    {
+      "eventId": "$lfLdfdhkeJnDP2v4JFnf-Gjk1HqYC_PrXo-Jrk4yodA",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-021"
+    },
+    {
+      "eventId": "$n3FSZMamENlJxrQ6QZxHuCRdzvRQjpF5Jzi5deTVUYE",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-020"
+    },
+    {
+      "eventId": "$nYuc3m7uB4UYIF9Nbek7nv_N2MpoiNXgEzG94XV4IJs",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-019"
+    },
+    {
+      "eventId": "$oj8rl666JeQv19V5pvB5AaPd5KEZPb3Kx7PfkJJv90E",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-001"
+    },
+    {
+      "eventId": "$qUYl0NUQyzpXWmbOrchBI0Oi0zBb9YqWUVkAjrwJIIE",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-023"
+    },
+    {
+      "eventId": "$q_EprphkWobdcqRLhqn44PNMc0iVrqg7R_E0V3XzW5U",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-017"
+    },
+    {
+      "eventId": "$tBS4jB3cSPkQ4TGN2JbXvn6Yfqu0tEDqZdgcL-BAcKA",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-008"
+    },
+    {
+      "eventId": "$wI8v-wujwhWWSk_pYh48pikdqxwzM-J_wq2v6O7RbKg",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-014"
+    },
+    {
+      "eventId": "$whWJjLtXelsnqEMeOhotK8j4cb0yCI2RvaqUqLTzMqc",
+      "roomId": "!gxQBDmlwksVwzTsmgt:localhost",
+      "type": "m.room.message",
+      "body": "cachemsg-005"
+    }
+  ],
+  "domIds": [
+    {
+      "eventId": "$oj8rl666JeQv19V5pvB5AaPd5KEZPb3Kx7PfkJJv90E",
+      "text": "cachemsg-001"
+    },
+    {
+      "eventId": "$Nnea0LqI1tkpF4WNr8lMeiZTHREEB0GMYIf-MgoXFi8",
+      "text": "cachemsg-002"
+    },
+    {
+      "eventId": "$Z4A-yK81CggsHxF93EOWo6pt23vfzV-E7bpZinsB_E8",
+      "text": "cachemsg-003"
+    },
+    {
+      "eventId": "$NZHbkDv0Ff5lj67M37WWWERF3FBfKO8pA5AdDzmfeCo",
+      "text": "cachemsg-004"
+    },
+    {
+      "eventId": "$whWJjLtXelsnqEMeOhotK8j4cb0yCI2RvaqUqLTzMqc",
+      "text": "cachemsg-005"
+    },
+    {
+      "eventId": "$ifdrY-Y7fb4zyFi-7yVy4gjmvF9SjP-MRMLtOKaShCI",
+      "text": "cachemsg-006"
+    },
+    {
+      "eventId": "$a7vEmTh-vEG1MZeK_rFB-Y9Y8Uq0j6I7UDkE5m-rZq4",
+      "text": "cachemsg-007"
+    },
+    {
+      "eventId": "$tBS4jB3cSPkQ4TGN2JbXvn6Yfqu0tEDqZdgcL-BAcKA",
+      "text": "cachemsg-008"
+    },
+    {
+      "eventId": "$41Ep32YzlmD7KVfhrRjmlkFjYA7IMFsc9Z1UMY-PbzI",
+      "text": "cachemsg-009"
+    },
+    {
+      "eventId": "$O1-eF3_Kt4oKMLIk_ycTyRFwIdGhFdpfLMxAUwxU2SY",
+      "text": "cachemsg-010"
+    },
+    {
+      "eventId": "$FEgNL0DgsVu_ohLPSA8YZzoyND8VUlNUpT-K28o_1Ck",
+      "text": "cachemsg-011"
+    },
+    {
+      "eventId": "$MlYi2N7Pxc7s5o7LDXtOWejmTORlZp6IrSH5UF0bpvQ",
+      "text": "cachemsg-012"
+    },
+    {
+      "eventId": "$fAbp_OPxCeWbwck7219dSxq2uSWMTOYjs2qcL4hRcwY",
+      "text": "cachemsg-013"
+    },
+    {
+      "eventId": "$wI8v-wujwhWWSk_pYh48pikdqxwzM-J_wq2v6O7RbKg",
+      "text": "cachemsg-014"
+    },
+    {
+      "eventId": "$kHcyA_FfSGAzEXm4tXEYSFvBspt1VrA-uv_Vyhf44fU",
+      "text": "cachemsg-015"
+    },
+    {
+      "eventId": "$YvpAFZNJbTuQFEV2mrUazxdWFcwCFTV3ow0L6mifuDg",
+      "text": "cachemsg-016"
+    },
+    {
+      "eventId": "$q_EprphkWobdcqRLhqn44PNMc0iVrqg7R_E0V3XzW5U",
+      "text": "cachemsg-017"
+    },
+    {
+      "eventId": "$jo_gw06j0TlbDPxCtSnj_JmvQqxvSBbCLe-JxivzeYw",
+      "text": "cachemsg-018"
+    },
+    {
+      "eventId": "$nYuc3m7uB4UYIF9Nbek7nv_N2MpoiNXgEzG94XV4IJs",
+      "text": "cachemsg-019"
+    },
+    {
+      "eventId": "$n3FSZMamENlJxrQ6QZxHuCRdzvRQjpF5Jzi5deTVUYE",
+      "text": "cachemsg-020"
+    },
+    {
+      "eventId": "$lfLdfdhkeJnDP2v4JFnf-Gjk1HqYC_PrXo-Jrk4yodA",
+      "text": "cachemsg-021"
+    },
+    {
+      "eventId": "$A-0300ki8Ex4zDYLXtz0TJTGMpFIxJxyNPT0lZCfIe8",
+      "text": "cachemsg-022"
+    },
+    {
+      "eventId": "$qUYl0NUQyzpXWmbOrchBI0Oi0zBb9YqWUVkAjrwJIIE",
+      "text": "cachemsg-023"
+    },
+    {
+      "eventId": "$Onlr-mDJFbZ-YaCNH-kMKR6olNaH5jKt0oaRAFFaFZs",
+      "text": "cachemsg-024"
+    }
+  ]
+}

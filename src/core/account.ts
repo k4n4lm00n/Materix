@@ -151,14 +151,23 @@ export class MatrixAccount {
       if (prev !== this.syncState) this.events.emit("self");
       bumpRooms();
     });
-    c.on(RoomEvent.Timeline, (_ev, room) => bumpRoom(room));
+    c.on(RoomEvent.Timeline, (ev, room) => {
+      // Edit invalidation (issue #4): an m.replace supersedes its target's
+      // content, so the target's cached plaintext must go — better to
+      // re-decrypt than resurrect a stale pre-edit body. The relation is
+      // cleartext even on encrypted events, so this fires before the edit
+      // itself is decrypted (and again from stored sync on every cold start).
+      const rel = ev.getRelation();
+      if (rel?.rel_type === "m.replace" && rel.event_id) this.evictCached(rel.event_id, ev.getRoomId());
+      bumpRoom(room);
+    });
     c.on(RoomEvent.LocalEchoUpdated, (_ev, room) => bumpRoom(room));
     c.on(RoomEvent.Receipt, (_ev, room) => bumpRoom(room));
     c.on(RoomEvent.Redaction, (ev, room) => {
       // Drop any cached plaintext for the redacted target so we never resurrect
       // redacted content from the decrypted cache.
       const targetId = ev.getAssociatedId();
-      if (targetId) this.decryptedCache.evict(targetId);
+      if (targetId) this.evictCached(targetId, room?.roomId ?? ev.getRoomId());
       bumpRoom(room);
     });
     // Explicit marked-unread flag (MSC2867) arrives as room account data.
@@ -172,6 +181,10 @@ export class MatrixAccount {
     c.on(RoomMemberEvent.Typing, (_ev, member) => bumpRoom(c.getRoom(member.roomId)));
     c.on(RoomStateEvent.Events, (ev) => bumpRoom(c.getRoom(ev.getRoomId() ?? undefined)));
     c.on(MatrixEventEvent.Decrypted, (ev) => {
+      // An edit that only reveals its m.replace relation once decrypted still
+      // invalidates its target (usually already caught cleartext in Timeline).
+      const rel = ev.getRelation();
+      if (rel?.rel_type === "m.replace" && rel.event_id) this.evictCached(rel.event_id, ev.getRoomId());
       // Persist the freshly-decrypted plaintext so a future cold launch can skip
       // re-decrypting it (issue #4). No-op on decryption failure (see record()).
       this.decryptedCache.record(ev);
@@ -434,12 +447,24 @@ export class MatrixAccount {
     return undefined;
   }
 
+  /** Drop an event's cached plaintext everywhere: the persistent row and any
+   * warm in-memory copy held by the room's handle (issue #4 invalidation). */
+  private evictCached(eventId: string, roomId?: string | null): void {
+    this.decryptedCache.evict(eventId);
+    if (roomId) this.handles.get(roomId)?.dropCachedClear(eventId);
+  }
+
   room(roomId: string): RoomHandle {
     let h = this.handles.get(roomId);
     if (!h) {
       const room = this.client.getRoom(roomId);
       if (!room) throw new Error(`unknown room ${roomId}`);
-      h = new RoomHandle(this.client, room);
+      // The decrypted cache + a render bump let the handle serve the issue #4
+      // read fast-path (cached plaintext while the SDK re-decrypts).
+      h = new RoomHandle(this.client, room, this.decryptedCache, () => {
+        this.events.emit(`room:${roomId}`);
+        this.events.emit("rooms");
+      });
       this.handles.set(roomId, h);
     }
     return h;
