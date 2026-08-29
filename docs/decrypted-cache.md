@@ -45,23 +45,36 @@ flagging upstream against matrix-js-sdk).
 - **Privacy** — the cache DB is closed on `stop()` and **deleted on
   `destroy()`** (sign-out), so cached plaintext never outlives the session.
 
-**Not yet wired — the read fast-path (the part that actually skips
-re-decryption):**
+**Read fast-path — wired (`src/core/roomHandle.ts`, `src/core/account.ts`):**
 
-The write side is complete and correct, but nothing reads the cache yet, so
-re-decryption is not yet avoided. The remaining work:
+The cache is now read on render, so a cold launch shows cached plaintext
+immediately instead of the "waiting for this message" placeholder while js-sdk
+re-decrypts in the background.
 
-1. On cold start, before/while the render layer (`src/core/roomHandle.ts`) shows
-   a timeline, look up each still-encrypted event via `DecryptedCache.get(id)`
-   and render the cached `{type, content}` immediately, letting js-sdk decrypt
-   lazily (or not at all) in the background.
-2. Decide the integration seam. matrix-js-sdk exposes **no supported setter** for
-   `MatrixEvent.clearEvent`, so we deliberately do **not** inject plaintext back
-   into the SDK. The clean option is to have Materix's own render/preview path
-   (`roomHandle.ts` `previewText`, timeline item builders) prefer the cache when
-   an event `isBeingDecrypted()`/`isEncrypted()` and only fall through to the SDK
-   on a miss.
-3. Invalidate on edits (`m.replace` relations) in addition to redaction.
+1. **Warm in-memory layer.** `DecryptedCache.get` is async but the timeline
+   snapshot builders are synchronous, so `RoomHandle` keeps a warm
+   `Map<eventId, CachedClear>`. On `timeline()` / `threadItems()`,
+   `warmFromCache()` batch-loads persisted plaintext for the room's
+   still-encrypted events off the render path (each id read at most once), then
+   calls back into the account to bump the room's render version
+   (`events.emit("room:…")`) so the synchronous builders re-run and paint the
+   hits. First paint is never blocked on IndexedDB.
+2. **Cache only while the SDK hasn't decrypted.** `awaitingDecryption(ev)` is
+   true while the event is encrypted and the SDK holds no clear content
+   (decryption failure / in-flight / type still `m.room.encrypted`). In that
+   window `toItem` builds the item from the cached `{type, content}` via
+   `cachedItem()`; on a miss it falls through to `encrypted-pending`. The
+   **SDK is the source of truth**: the moment js-sdk fires
+   `MatrixEventEvent.Decrypted`, `awaitingDecryption` turns false, the cache
+   branch is skipped, and the write side re-records. Plaintext is **never**
+   injected back into the SDK (`MatrixEvent.clearEvent` has no supported
+   setter) — this is a Materix-side display accelerator only.
+3. **Invalidation.** `m.replace` edits evict the target's cached row (both the
+   persistent row and the handle's warm copy) — caught cleartext in
+   `RoomEvent.Timeline` before the edit itself decrypts, and again on
+   `Decrypted`. Redaction evict and sign-out (`destroy`) DB deletion are kept.
+4. Every cache op stays best-effort: an absent cache disables the fast-path and
+   a fault only forgoes the optimization; messaging is never affected.
 
 ## Open questions
 
