@@ -193,6 +193,26 @@ class MaterixPushBridge(activity: Activity) {
         }
     }
 
+    // --- Top-level system Back (Element-style) -----------------------------
+
+    /**
+     * Send the task to the background (Android home screen) WITHOUT finishing
+     * the activity: the process and warm WebView survive, so the next launcher
+     * tap resumes instantly instead of cold-reloading the frontend. Called by
+     * src/ui/androidBack.ts when a system Back press has nothing left to close
+     * in-app (the room list is the top level).
+     */
+    @JavascriptInterface
+    fun moveTaskToBack() {
+        val act = activityRef.get() ?: return
+        act.runOnUiThread {
+            try {
+                act.moveTaskToBack(true)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
     // --- Foreground "keep sync alive" service (opt-in) ---------------------
     // Prevents Android from reclaiming the backgrounded process (and its warm,
     // already-decrypted state). See MaterixSyncService.kt.

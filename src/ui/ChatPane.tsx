@@ -38,12 +38,10 @@ export function ChatPane({
   selection,
   onBack,
   onToggleDetails,
-  showBackButton,
 }: {
   selection: Selection | null;
   onBack: () => void;
   onToggleDetails: () => void;
-  showBackButton: boolean;
 }) {
   useRoomsVersion();
   const account = accountManager.tryAccount(selection?.accountKey ?? null);
@@ -162,11 +160,11 @@ export function ChatPane({
         </div>
       )}
       <header className="chat-header">
-        {showBackButton && (
-          <button className="icon-btn" onClick={onBack} aria-label="Back to chat list">
-            <IconBack size={20} />
-          </button>
-        )}
+        {/* Element-style room header: an in-app Back is always first, in every
+            layout — it and hardware Back both return chat → room list. */}
+        <button className="icon-btn" onClick={onBack} title="Back to chat list" aria-label="Back to chat list">
+          <IconBack size={20} />
+        </button>
         <Avatar
           account={account}
           mxc={summary?.avatarUrl}

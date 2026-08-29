@@ -8,7 +8,12 @@
 #   2. adds the UnifiedPush connector dependency (JitPack) + repo,
 #   3. adds POST_NOTIFICATIONS/WAKE_LOCK perms, distributor <queries>, and the
 #      <receiver> to the merged AndroidManifest,
-#   4. adds the onWebViewCreate() hook to MainActivity so the JS bridge attaches.
+#   4. adds the onWebViewCreate() hook to MainActivity so the JS bridge attaches,
+#   5. makes system Back NEVER close the app: disables wry's default Back
+#      handling and forwards every Back press to the WebView as a JS
+#      "android-back" event (handled by src/ui/androidBack.ts, which closes
+#      UI or — at the top level — backgrounds the task via the bridge's
+#      moveTaskToBack, keeping the activity alive, Element-style).
 #
 # See packaging/android/push/*.kt and docs/push-notifications.md.
 set -euo pipefail
@@ -129,12 +134,56 @@ s, n = re.subn(
     '  // Attach the UnifiedPush ↔ JS bridge as soon as the WebView exists.\n'
     '  override fun onWebViewCreate(webView: android.webkit.WebView) {\n'
     '    super.onWebViewCreate(webView)\n'
+    '    materixWebView = webView\n'
     '    MaterixPush.attach(this, webView)\n'
     '  }\n\n',
     s, count=1)
 assert n == 1, "could not find MainActivity class body to add onWebViewCreate"
 open(p, 'w').write(s)
 print("apply-android-push: MainActivity onWebViewCreate hook added")
+PY
+
+# 5. MainActivity: system Back must never close the app ----------------------
+# wry's WryActivity installs its own OnBackPressedCallback (WebView
+# history.back, else finish()) unless `handleBackNavigation` is false. Disable
+# it and register an always-enabled callback that forwards Back into the page
+# as an "android-back" event; src/ui/androidBack.ts closes menus/panes or, at
+# the top level, backgrounds the task (moveTaskToBack — activity stays alive).
+# The only way to actually close Materix is the app switcher.
+python3 - "$MA" <<'PY'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+if 'android-back' in s:
+    print("apply-android-push: MainActivity back handler already present"); sys.exit(0)
+# Step 4 must have injected the webView capture; a stale gen tree from an
+# older script version would leave materixWebView never assigned.
+assert 'materixWebView = webView' in s, \
+    "onWebViewCreate hook lacks the webView capture — delete src-tauri/gen/android and re-run 'tauri android init'"
+s, n = re.subn(
+    r'(class MainActivity : TauriActivity\(\) \{\n)',
+    r'\1'
+    '  // System Back never closes Materix: wry\'s default Back handling\n'
+    '  // (WebView history back / activity finish) is disabled and every press\n'
+    '  // is forwarded to the page instead (see src/ui/androidBack.ts).\n'
+    '  override val handleBackNavigation: Boolean = false\n'
+    '  private var materixWebView: android.webkit.WebView? = null\n\n',
+    s, count=1)
+assert n == 1, "could not find MainActivity class body to add back-handling fields"
+s, n = re.subn(
+    r'(super\.onCreate\([^\n)]*\)\s*\n)',
+    r'\1'
+    '    onBackPressedDispatcher.addCallback(\n'
+    '      this,\n'
+    '      object : androidx.activity.OnBackPressedCallback(true) {\n'
+    '        override fun handleOnBackPressed() {\n'
+    '          materixWebView?.evaluateJavascript(\n'
+    '            "window.dispatchEvent(new Event(\'android-back\'))", null)\n'
+    '        }\n'
+    '      })\n',
+    s, count=1)
+assert n == 1, "could not find super.onCreate() to register the back callback"
+open(p, 'w').write(s)
+print("apply-android-push: MainActivity back-to-JS handler added")
 PY
 
 echo "apply-android-push: done"

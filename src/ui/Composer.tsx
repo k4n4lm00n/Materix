@@ -102,13 +102,18 @@ export function Composer({
     if (taRef.current) taRef.current.style.height = "auto";
     setTyping(false);
     const currentMode = mode;
-    onClearMode();
     try {
-      if (currentMode?.kind === "edit" && currentMode.item.eventId) {
+      if (currentMode?.kind === "edit") {
+        // Never fall through to a plain send here: a failed edit must stay an
+        // edit, or retrying would post the text as a new message.
+        if (!currentMode.item.eventId) throw new Error("original message has no event id");
         await handle.edit(currentMode.item.eventId, value);
       } else {
         await handle.sendText(value, currentMode?.kind === "reply" ? currentMode.item.eventId : undefined);
       }
+      // Only clear reply/edit mode once the send succeeded, so a transient
+      // failure keeps the mode (and the restored text) for a retry.
+      onClearMode();
     } catch (e) {
       showError(e);
       setText(value); // don't lose the user's message

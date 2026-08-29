@@ -8,6 +8,7 @@ import type { MatrixAccount } from "../../core/account";
 import { Modal } from "../components/Modal";
 import { IconDownload, IconFile, IconKey, IconShieldCheck } from "../components/Icons";
 import { useToast } from "../components/Toast";
+import { copyText } from "../clipboard";
 import { uiBus } from "../bus";
 
 export function SecurityDialog({ account, onClose }: { account: MatrixAccount; onClose: () => void }) {
@@ -84,7 +85,7 @@ export function SecurityDialog({ account, onClose }: { account: MatrixAccount; o
           <div style={{ display: "flex", gap: "var(--sp-2)" }}>
             <button
               className="btn secondary"
-              onClick={() => navigator.clipboard.writeText(recoveryKeyOut).then(() => show("Copied."))}
+              onClick={() => copyText(recoveryKeyOut).then(() => show("Copied."), showError)}
             >
               Copy
             </button>

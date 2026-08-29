@@ -71,6 +71,10 @@ export const IconChevronUp = icon(<path d="m18 15-6-6-6 6" />);
 
 export const IconChevronDown = icon(<path d="m6 9 6 6 6-6" />);
 
+export const IconChevronLeft = icon(<path d="m15 18-6-6 6-6" />);
+
+export const IconChevronRight = icon(<path d="m9 18 6-6-6-6" />);
+
 export const IconReply = icon(
   <>
     <polyline points="9 17 4 12 9 7" />
@@ -134,9 +138,20 @@ export const IconLogout = icon(
   </>,
 );
 
+export const IconEnter = icon(
+  <>
+    <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+    <path d="m10 17 5-5-5-5M15 12H3" />
+  </>,
+);
+
+export const IconCollapse = icon(<path d="m11 17-5-5 5-5M18 17l-5-5 5-5" />);
+
 export const IconChat = icon(
   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />,
 );
+
+export const IconHash = icon(<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" />);
 
 export const IconThreads = icon(
   <>

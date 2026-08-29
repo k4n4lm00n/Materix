@@ -3,11 +3,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { accountManager } from "../core/manager";
 import type { RoomSummary, SpaceSummary } from "../core/types";
-import { useAccounts, useClock, useMediaQuery, useRoomsVersion } from "./hooks";
+import { useAccounts, useClock, useRoomsVersion } from "./hooks";
 import { Avatar } from "./components/Avatar";
 import { ContextMenu, type MenuState } from "./components/ContextMenu";
-import { IconChat, IconGlobe, IconLock, IconMuted, IconPlus, IconSearch, IconSettings, IconShield } from "./components/Icons";
+import { IconChat, IconChevronLeft, IconChevronRight, IconGlobe, IconHash, IconLock, IconMuted, IconPlus, IconSearch, IconSettings, IconShield } from "./components/Icons";
 import { formatListTime, typingText } from "./format";
+import { copyText } from "./clipboard";
 import { useToast } from "./components/Toast";
 
 export interface Selection {
@@ -35,9 +36,11 @@ const MUTE_PRESETS: [string, number][] = [
 export function AccountRail({
   onAddAccount,
   onSettings,
+  onHide,
 }: {
   onAddAccount: () => void;
   onSettings: () => void;
+  onHide: () => void;
 }) {
   useAccounts();
   useRoomsVersion();
@@ -46,6 +49,11 @@ export function AccountRail({
 
   return (
     <nav className={`rail${accounts.length > 1 ? " multi" : ""}`} aria-label="Accounts">
+      {/* « — collapses the bar; its » twin then appears in the room-list
+          header (see RoomListPane), so one chevron is always visible. */}
+      <button className="rail-btn" onClick={onHide} title="Hide accounts bar" aria-label="Hide accounts bar">
+        <IconChevronLeft />
+      </button>
       <div className="rail-accounts">
         {accounts.map((a) => {
           const unread = accountManager
@@ -57,9 +65,11 @@ export function AccountRail({
               key={a.key}
               className={`rail-btn${a.key === active ? " active" : ""}`}
               style={{ ["--account-color" as string]: a.color }}
-              onClick={() => accountManager.setActive(a.key)}
-              title={`${a.userId}${a.syncState === "error" ? " — connection trouble" : ""}`}
-              aria-label={`Account ${a.userId}`}
+              // Clicking the already-active account opens Settings (instead of
+              // a no-op re-activation); other accounts switch as before.
+              onClick={() => (a.key === active ? onSettings() : accountManager.setActive(a.key))}
+              title={`${a.userId}${a.key === active ? " — settings" : ""}${a.syncState === "error" ? " — connection trouble" : ""}`}
+              aria-label={a.key === active ? `Account ${a.userId} — open settings` : `Switch to account ${a.userId}`}
               aria-current={a.key === active}
             >
               <Avatar account={accountManager.account(a.key)} mxc={a.avatarUrl} name={a.displayName} id={a.userId} size={38} />
@@ -84,13 +94,21 @@ export function RoomListPane({
   onSelect,
   onNewChat,
   onOpenSecurity,
+  onAddAccount,
   onSettings,
+  onManageAccount,
+  accountsBarShown,
+  onToggleAccountsBar,
 }: {
   selection: Selection | null;
   onSelect: (sel: Selection) => void;
   onNewChat: (tab: NewChatTab) => void;
   onOpenSecurity: (accountKey: string) => void;
+  onAddAccount: () => void;
   onSettings: () => void;
+  onManageAccount: () => void;
+  accountsBarShown: boolean;
+  onToggleAccountsBar: () => void;
 }) {
   useRoomsVersion();
   useAccounts();
@@ -99,14 +117,15 @@ export function RoomListPane({
   const [space, setSpace] = useState<SpaceFilter>({ kind: "all" });
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [showArchived, setShowArchived] = useState(false);
-  // Narrow screens replace the "Chats" heading with top-level Chats/Rooms tabs
-  // (the account rail that hosts Settings on wide layouts is collapsed there).
-  const narrow = useMediaQuery("(max-width: 760px)");
-  const [section, setSection] = useState<"chats" | "rooms">("chats");
+  // Chats (direct) / Rooms (everything else) are independent show/hide toggles
+  // rendered in the header in every orientation; both default on.
+  const [showChats, setShowChats] = useState(true);
+  const [showRooms, setShowRooms] = useState(true);
   const { showError, show } = useToast();
 
   const accounts = accountManager.list();
   const multiAccount = accounts.length > 1;
+  const activeMeta = accounts.find((a) => a.key === accountManager.active) ?? accounts[0];
 
   const allRooms = useMemo(() => {
     const rooms: RoomSummary[] = [];
@@ -164,8 +183,9 @@ export function RoomListPane({
 
   const q = filter.trim().toLowerCase();
   const visible = allRooms.filter((r) => !r.isSpace && (!q || r.name.toLowerCase().includes(q)));
-  // Narrow layouts split the list into Chats (direct) / Rooms (everything else).
-  const inSection = (r: RoomSummary) => !narrow || (section === "chats" ? r.isDirect : !r.isDirect);
+  // The list splits into Chats (direct) / Rooms (everything else); each half
+  // is visible only while its header toggle is on.
+  const inSection = (r: RoomSummary) => (r.isDirect ? showChats : showRooms);
   // Invitations stay visible regardless of space/section; chats are filtered.
   const inSpace = visible.filter(
     (r) => r.isInvite || ((!spaceMembership || spaceMembership(r)) && inSection(r)),
@@ -185,6 +205,14 @@ export function RoomListPane({
   const colorOf = (key: string) => accounts.find((a) => a.key === key)?.color ?? "gray";
 
   const anyUnread = allRooms.some((r) => !r.isInvite && !r.isSpace && (r.unreadCount > 0 || r.markedUnread));
+  // Per-toggle unread badges: messages + pending invites, split like the rail
+  // badge but by direct (Chats) vs everything else (Rooms).
+  const unreadIn = (direct: boolean) =>
+    allRooms
+      .filter((r) => !r.isSpace && r.isDirect === direct)
+      .reduce((n, r) => n + r.unreadCount + (r.isInvite ? 1 : 0), 0);
+  const chatsUnread = unreadIn(true);
+  const roomsUnread = unreadIn(false);
   const markAllRead = async () => {
     const results = await Promise.allSettled(accounts.map((a) => accountManager.tryAccount(a.key)?.markAllRead()));
     const failed = results.find((x) => x.status === "rejected") as PromiseRejectedResult | undefined;
@@ -195,28 +223,90 @@ export function RoomListPane({
   return (
     <div className="rooms-pane">
       <div className="rooms-header">
-        {narrow ? (
-          <div className="section-tabs" role="tablist" aria-label="Sections">
-            <button
-              className={`section-tab${section === "chats" ? " active" : ""}`}
-              role="tab"
-              aria-selected={section === "chats"}
-              onClick={() => setSection("chats")}
-            >
-              Chats
-            </button>
-            <button
-              className={`section-tab${section === "rooms" ? " active" : ""}`}
-              role="tab"
-              aria-selected={section === "rooms"}
-              onClick={() => setSection("rooms")}
-            >
-              Rooms
-            </button>
-          </div>
-        ) : (
-          <h1>Chats</h1>
+        {/* » — persistent affordance to bring the accounts bar back; while the
+            bar is shown its own « (AccountRail) hides it instead. */}
+        {!accountsBarShown && (
+          <button
+            className="icon-btn"
+            onClick={onToggleAccountsBar}
+            title="Show accounts bar"
+            aria-label="Show accounts bar"
+          >
+            <IconChevronRight size={20} />
+          </button>
         )}
+        {activeMeta && (
+          <button
+            className="header-avatar-btn"
+            onClick={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              setMenu({
+                x: r.left,
+                y: r.bottom + 4,
+                items: [
+                  { label: "Manage account", onClick: onManageAccount },
+                  { label: "Add account", onClick: onAddAccount },
+                  {
+                    label: accountsBarShown ? "Hide accounts bar" : "Show accounts bar",
+                    onClick: onToggleAccountsBar,
+                  },
+                  { label: "Settings", onClick: onSettings },
+                  {
+                    label: "Logout",
+                    danger: true,
+                    onClick: async () => {
+                      if (
+                        !confirm(
+                          `Sign out ${activeMeta.userId}? Encrypted history on this device will be removed.`,
+                        )
+                      )
+                        return;
+                      try {
+                        await accountManager.logout(activeMeta.key);
+                        show("Signed out.");
+                      } catch (e) {
+                        showError(e);
+                      }
+                    },
+                  },
+                ],
+              });
+            }}
+            title={`${activeMeta.userId} — account menu`}
+            aria-label={`Account menu for ${activeMeta.userId}`}
+            aria-haspopup="menu"
+          >
+            <Avatar
+              account={accountManager.tryAccount(activeMeta.key)}
+              mxc={activeMeta.avatarUrl}
+              name={activeMeta.displayName}
+              id={activeMeta.userId}
+              size={28}
+            />
+          </button>
+        )}
+        <div className="section-tabs" aria-label="Sections">
+          <button
+            className={`section-tab${showChats ? " active" : ""}`}
+            aria-pressed={showChats}
+            onClick={() => setShowChats((v) => !v)}
+            title={showChats ? "Hide chats" : "Show chats"}
+            aria-label={`${showChats ? "Hide" : "Show"} chats${chatsUnread > 0 ? ` (${chatsUnread} unread)` : ""}`}
+          >
+            <IconChat size={20} />
+            {chatsUnread > 0 && <span className="section-badge">{chatsUnread > 99 ? "99+" : chatsUnread}</span>}
+          </button>
+          <button
+            className={`section-tab${showRooms ? " active" : ""}`}
+            aria-pressed={showRooms}
+            onClick={() => setShowRooms((v) => !v)}
+            title={showRooms ? "Hide rooms" : "Show rooms"}
+            aria-label={`${showRooms ? "Hide" : "Show"} rooms${roomsUnread > 0 ? ` (${roomsUnread} unread)` : ""}`}
+          >
+            <IconHash size={20} />
+            {roomsUnread > 0 && <span className="section-badge">{roomsUnread > 99 ? "99+" : roomsUnread}</span>}
+          </button>
+        </div>
         <button
           className="icon-btn"
           onClick={() => onNewChat("explore")}
@@ -246,11 +336,11 @@ export function RoomListPane({
         >
           <IconPlus size={20} />
         </button>
-        {narrow && (
-          <button className="icon-btn" onClick={onSettings} title="Settings" aria-label="Settings">
-            <IconSettings size={20} />
-          </button>
-        )}
+        {/* No standalone "Join a room" (IconEnter) button: its door-and-arrow
+            glyph reads as a logout icon in the bar. Join lives in the + menu. */}
+        <button className="icon-btn" onClick={onSettings} title="Settings" aria-label="Settings">
+          <IconSettings size={20} />
+        </button>
       </div>
       <SecurityBanner onOpenSecurity={onOpenSecurity} />
       <div className="search-box">
@@ -414,7 +504,12 @@ export function RoomListPane({
               <p>No chats match "{filter}".</p>
             ) : space.kind !== "all" ? (
               <p>No chats in this space yet.</p>
-            ) : narrow && section === "rooms" ? (
+            ) : !showChats && !showRooms ? (
+              <>
+                <h2 style={{ fontSize: "var(--fs-lg)" }}>Everything is hidden</h2>
+                <p>Turn the Chats or Rooms filter back on above.</p>
+              </>
+            ) : showRooms && !showChats ? (
               <>
                 <h2 style={{ fontSize: "var(--fs-lg)" }}>No rooms yet</h2>
                 <p>Join or create a room to get going.</p>
@@ -422,10 +517,10 @@ export function RoomListPane({
                   Join a room
                 </button>
               </>
-            ) : narrow && section === "chats" && visible.some((r) => !r.isDirect && !r.isInvite) ? (
+            ) : showChats && !showRooms && visible.some((r) => !r.isDirect && !r.isInvite) ? (
               <>
                 <h2 style={{ fontSize: "var(--fs-lg)" }}>No direct chats yet</h2>
-                <p>Your group conversations are in the Rooms tab.</p>
+                <p>Your group conversations are behind the Rooms filter.</p>
                 <button className="btn primary" onClick={() => onNewChat("dm")}>
                   Start a chat
                 </button>
@@ -581,7 +676,7 @@ function RoomSection({
         },
         {
           label: "Copy room address",
-          onClick: () => navigator.clipboard.writeText(r.roomId).then(() => show("Copied.")),
+          onClick: () => copyText(r.roomId).then(() => show("Copied."), showError),
         },
         {
           label: "Leave",

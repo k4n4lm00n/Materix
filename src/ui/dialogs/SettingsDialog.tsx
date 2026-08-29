@@ -1,7 +1,7 @@
 // Settings: appearance, accounts (profile, sign out), security per account
 // (verification, devices, key backup).
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { accountManager } from "../../core/manager";
 import type { MatrixAccount } from "../../core/account";
 import type { DeviceSummary, SasFlow } from "../../core/types";
@@ -31,10 +31,13 @@ export function SettingsDialog({
   onClose,
   onAddAccount,
   onStartVerification,
+  initialSection,
 }: {
   onClose: () => void;
   onAddAccount: () => void;
   onStartVerification: (flow: SasFlow) => void;
+  /** Scroll this section into view on open (e.g. header avatar → "Manage account"). */
+  initialSection?: "accounts";
 }) {
   useAccounts();
   const accounts = accountManager.list();
@@ -42,6 +45,11 @@ export function SettingsDialog({
   const [notifMode, setNotifMode] = useState<NotificationMode>(getPrefs().notifications);
   const [sound, setSound] = useState<SoundId>(getPrefs().sound);
   const { show, showError } = useToast();
+
+  const accountsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (initialSection === "accounts") accountsRef.current?.scrollIntoView({ block: "start" });
+  }, [initialSection]);
 
   return (
     <Modal title="Settings" onClose={onClose} wide>
@@ -121,7 +129,7 @@ export function SettingsDialog({
           {isAndroid && <PushSettings />}
         </div>
 
-        <div className="settings-section">
+        <div className="settings-section" ref={accountsRef}>
           <h3>Accounts</h3>
           {accounts.map((a) => (
             <AccountSettings

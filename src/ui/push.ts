@@ -30,6 +30,8 @@ interface MaterixPushNative {
   getEndpoint(): string;
   hasNotificationPermission(): boolean;
   requestNotificationPermission(): void;
+  /** Top-level Back: background the task, activity kept alive (androidBack.ts). */
+  moveTaskToBack(): void;
   // Foreground "keep sync alive" service (see MaterixSyncService.kt).
   isForegroundSyncSupported(): boolean;
   isForegroundSyncRunning(): boolean;

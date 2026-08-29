@@ -32,6 +32,7 @@ import {
 } from "./components/Icons";
 import { ForwardDialog } from "./dialogs/ForwardDialog";
 import { formatDayDivider, formatDuration, formatSize, formatTime } from "./format";
+import { copyText } from "./clipboard";
 import { useToast } from "./components/Toast";
 import { isOfflineError } from "../core/errors";
 import { assessLink, isTrusted, openExternal, type LinkAssessment } from "./linkSafety";
@@ -283,6 +284,76 @@ export function TimelineRow({
 
   const [showActions, setShowActions] = useState(false);
 
+  // Touch: only a deliberate long-press on the bubble reveals the action bar.
+  // A timer starts on pointerdown and is cancelled by ANY sign of a scroll or
+  // gesture: movement past a small slop on either axis, pointerup (a tap),
+  // pointercancel (the browser took the gesture over — `touch-action: pan-y`
+  // guarantees it fires once vertical panning starts), a second finger, or any
+  // `scroll` event on the timeline container while the timer is pending (if
+  // the list moved at all, it's a scroll, not a long-press). `fired` swallows
+  // the synthetic click that follows a completed long-press; `touch` routes
+  // long-press-generated contextmenu events (Android fires those) away from
+  // the desktop menu. All mutable state lives in a ref, so re-renders while a
+  // room re-virtualizes never leave stale closures armed; the scroll-cancel is
+  // a capture-phase document listener attached per press, so it watches
+  // whatever scroll container actually exists at press time.
+  const press = useRef<{
+    timer: number | null;
+    x: number;
+    y: number;
+    pointerId: number | null;
+    fired: boolean;
+    touch: boolean;
+    detachScroll: (() => void) | null;
+  }>({ timer: null, x: 0, y: 0, pointerId: null, fired: false, touch: false, detachScroll: null });
+  const cancelPress = () => {
+    const p = press.current;
+    if (p.timer !== null) {
+      window.clearTimeout(p.timer);
+      p.timer = null;
+    }
+    p.pointerId = null;
+    p.detachScroll?.();
+    p.detachScroll = null;
+  };
+  useEffect(() => cancelPress, []);
+  const onPressStart = (e: React.PointerEvent) => {
+    const p = press.current;
+    p.touch = e.pointerType !== "mouse";
+    p.fired = false;
+    if (e.pointerType === "mouse") return; // desktop: hover + right-click as before
+    if (p.timer !== null) {
+      // A second finger landed while a press was pending: that's a gesture
+      // (pinch/two-finger scroll), never a long-press.
+      cancelPress();
+      return;
+    }
+    if (!e.isPrimary) return; // only the primary touch pointer arms
+    const target = e.target as HTMLElement;
+    if (!target.closest(".bubble") || target.closest("a")) return;
+    p.x = e.clientX;
+    p.y = e.clientY;
+    p.pointerId = e.pointerId;
+    // Scroll events don't bubble, but a capture-phase document listener sees
+    // every scroll target — the .timeline container, the document itself, or
+    // whatever container exists after a reflow — so this can't go stale.
+    const onScroll = () => cancelPress();
+    document.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    p.detachScroll = () => document.removeEventListener("scroll", onScroll, { capture: true });
+    p.timer = window.setTimeout(() => {
+      p.timer = null;
+      p.detachScroll?.();
+      p.detachScroll = null;
+      p.fired = true;
+      setShowActions((v) => !v);
+    }, 470);
+  };
+  const onPressMove = (e: React.PointerEvent) => {
+    const p = press.current;
+    if (p.timer === null || e.pointerId !== p.pointerId) return;
+    if (Math.abs(e.clientX - p.x) > 8 || Math.abs(e.clientY - p.y) > 8) cancelPress();
+  };
+
   const openUserMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     const userId = item.sender.userId;
@@ -330,6 +401,17 @@ export function TimelineRow({
   }
 
   const mine = !!item.isMine;
+  // Edit is only offered once the server has acknowledged the message: a
+  // pending local echo still carries a `~roomId:txnId` placeholder id and a
+  // "sending"/"failed" sendState, and targeting it with an m.replace races the
+  // original send (server-side errors). A fully synced event has a real `$…`
+  // id and no sendState; a just-acked one reports "sent".
+  const serverAcked =
+    !!item.eventId &&
+    !item.eventId.startsWith("~") &&
+    item.sendState !== "sending" &&
+    item.sendState !== "failed";
+  const canEdit = mine && item.body?.msgtype === "m.text" && serverAcked;
   const react = (key: string) => {
     if (item.eventId) handle.react(item.eventId, key).catch(showError);
   };
@@ -357,9 +439,9 @@ export function TimelineRow({
     if (item.body?.text)
       items.push({
         label: "Copy text",
-        onClick: () => navigator.clipboard.writeText(item.body!.text ?? "").then(() => show("Copied.")),
+        onClick: () => copyText(item.body!.text ?? "").then(() => show("Copied."), showError),
       });
-    if (mine && item.body?.msgtype === "m.text") items.push({ label: "Edit", onClick: () => onEdit(item) });
+    if (canEdit) items.push({ label: "Edit", onClick: () => onEdit(item) });
     const mx = e.clientX;
     const my = e.clientY;
     if (!mine)
@@ -397,11 +479,31 @@ export function TimelineRow({
     <div
       className={`msg-row${mine ? " mine" : ""}${item.groupStart ? " group-start" : ""}${showActions ? " show-actions" : ""}`}
       data-event-id={item.eventId}
-      onContextMenu={openMsgMenu}
+      onContextMenu={(e) => {
+        // Android synthesizes contextmenu from a long-press; touch is handled
+        // by the long-press action bar, so only real right-clicks open the menu.
+        if (press.current.touch) {
+          e.preventDefault();
+          return;
+        }
+        openMsgMenu(e);
+      }}
+      onPointerDown={onPressStart}
+      onPointerMove={onPressMove}
+      onPointerUp={cancelPress}
+      onPointerCancel={cancelPress}
       onClick={(e) => {
-        // On touch (no hover), tap toggles the action bar.
-        if (window.matchMedia("(hover: none)").matches && (e.target as HTMLElement).closest(".bubble")) {
-          setShowActions((v) => !v);
+        if (press.current.fired) {
+          // Swallow the synthetic click that follows a long-press so it
+          // doesn't immediately toggle the bar back off.
+          press.current.fired = false;
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        // A plain tap never opens the bar, but does dismiss an open one.
+        if (showActions && press.current.touch && (e.target as HTMLElement).closest(".bubble")) {
+          setShowActions(false);
         }
       }}
     >
@@ -504,7 +606,7 @@ export function TimelineRow({
               <IconChat size={15} />
             </button>
           )}
-          {mine && item.body?.msgtype === "m.text" && (
+          {canEdit && (
             <button onClick={() => onEdit(item)} title="Edit" aria-label="Edit">
               <IconEdit size={15} />
             </button>

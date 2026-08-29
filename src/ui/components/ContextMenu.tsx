@@ -1,7 +1,34 @@
 // Generic context menu: opens at pointer position, closes on Escape /
-// click-outside / selection, keyboard navigable.
+// outside press / selection, keyboard navigable. A full-viewport backdrop
+// consumes the outside press so the UI underneath never reacts to it (no room
+// selection, no view toggle) — and the button that opened the menu becomes a
+// toggle for free, because its second press lands on the backdrop and only
+// closes.
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+
+// The press that dismisses the menu still produces a trailing click after the
+// backdrop unmounts, retargeted at whatever sits under the pointer (the old
+// close-on-mousedown/reopen-on-click race). Swallow exactly that one click at
+// the capture phase; the timeout covers presses that never produce a click
+// (e.g. a touch drag).
+function swallowNextClick() {
+  const swallow = (e: Event) => {
+    e.stopPropagation();
+    e.preventDefault();
+    cleanup();
+  };
+  const cleanup = () => {
+    window.removeEventListener("click", swallow, true);
+    window.removeEventListener("pointerdown", cleanup, true);
+    window.clearTimeout(timer);
+  };
+  window.addEventListener("click", swallow, true);
+  // A NEW press is a new gesture — its click must go through. (The capture
+  // listener can't fire for the press currently dispatching.)
+  window.addEventListener("pointerdown", cleanup, true);
+  const timer = window.setTimeout(cleanup, 600);
+}
 
 export interface MenuItem {
   label: string;
@@ -47,33 +74,40 @@ export function ContextMenu({ menu, onClose }: { menu: MenuState; onClose: () =>
         items[(next + items.length) % items.length]?.focus();
       }
     };
-    const onDown = (e: MouseEvent) => {
-      if (!el?.contains(e.target as Node)) onClose();
-    };
     window.addEventListener("keydown", onKey);
-    window.addEventListener("mousedown", onDown);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("mousedown", onDown);
-    };
+    return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
   return (
-    <div className="ctx-menu" ref={ref} style={{ left: pos.x, top: pos.y }} role="menu">
-      {menu.items.map((item, i) => (
-        <button
-          key={i}
-          role="menuitem"
-          className={item.danger ? "danger" : undefined}
-          onClick={() => {
-            onClose();
-            item.onClick();
-          }}
-        >
-          {item.icon}
-          {item.label}
-        </button>
-      ))}
-    </div>
+    <>
+      <div
+        className="ctx-backdrop"
+        onPointerDown={(e) => {
+          // Consume the outside press entirely (mouse AND touch — pointerdown
+          // covers both): close the menu, keep the view exactly as-is.
+          e.preventDefault();
+          e.stopPropagation();
+          swallowNextClick();
+          onClose();
+        }}
+        onContextMenu={(e) => e.preventDefault()}
+      />
+      <div className="ctx-menu" ref={ref} style={{ left: pos.x, top: pos.y }} role="menu">
+        {menu.items.map((item, i) => (
+          <button
+            key={i}
+            role="menuitem"
+            className={item.danger ? "danger" : undefined}
+            onClick={() => {
+              onClose();
+              item.onClick();
+            }}
+          >
+            {item.icon}
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </>
   );
 }

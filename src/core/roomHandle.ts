@@ -33,6 +33,7 @@ import type {
   TimelineItem,
 } from "./types";
 import { MaterixError, toMaterixError } from "./errors";
+import type { CachedClear, DecryptedCache } from "./decryptedCache";
 import {
   markdownToMatrixHtml,
   sanitizeIncomingHtml,
@@ -156,9 +157,22 @@ export class RoomHandle {
    * vanish the moment we send the read receipt. */
   private frozenMarker: string | null = null;
 
+  /** Read fast-path (issue #4): warm in-memory layer over the persistent
+   * decrypted cache. IndexedDB reads are async but the snapshot builders are
+   * synchronous, so cached plaintext is batch-loaded into this map and the
+   * builders read it synchronously on the re-render that follows. */
+  private warmClear = new Map<string, CachedClear>();
+  /** Event ids already looked up (hit or miss) so each id costs at most one
+   * IndexedDB read per session. */
+  private warmChecked = new Set<string>();
+
   constructor(
     private client: MatrixClient,
     private room: Room,
+    /** Persistent decrypted-plaintext cache; absent = fast-path disabled. */
+    private cache?: DecryptedCache,
+    /** Bumps the room's render version once warm cache hits arrive. */
+    private onCacheWarm?: () => void,
   ) {}
 
   get roomId(): string {
@@ -180,10 +194,73 @@ export class RoomHandle {
     this.frozenMarker = readUpTo;
   }
 
+  /** True while the SDK holds no clear content for an (encrypted) event —
+   * decryption pending, failed, or not yet attempted. Once js-sdk decrypts,
+   * getType()/getContent() reflect the clear event and this turns false. */
+  private awaitingDecryption(ev: MatrixEvent): boolean {
+    return (
+      !ev.isRedacted() &&
+      (ev.isDecryptionFailure() || ev.isBeingDecrypted() || ev.getType() === EventType.RoomMessageEncrypted)
+    );
+  }
+
+  /**
+   * Read fast-path (issue #4): asynchronously batch-load persisted plaintext
+   * for still-encrypted events into the warm map, then bump the room so the
+   * synchronous builders re-run with the hits. Never blocks the snapshot
+   * being built right now; best-effort throughout (a cache fault only means
+   * the normal re-decryption path is used).
+   */
+  private warmFromCache(events: MatrixEvent[]): void {
+    const cache = this.cache;
+    if (!cache) return;
+    const wanted: string[] = [];
+    for (const ev of events) {
+      const id = ev.getId();
+      if (!id) continue;
+      if (!this.awaitingDecryption(ev)) {
+        // The SDK has (re-)decrypted or redacted it — its view wins from here.
+        this.warmClear.delete(id);
+        continue;
+      }
+      if (this.warmChecked.has(id)) continue;
+      this.warmChecked.add(id);
+      wanted.push(id);
+    }
+    if (!wanted.length) return;
+    void Promise.all(wanted.map((id) => cache.get(id))).then((rows) => {
+      let hits = 0;
+      for (const row of rows) {
+        if (!row) continue;
+        this.warmClear.set(row.eventId, row);
+        hits++;
+      }
+      if (hits) this.onCacheWarm?.();
+    });
+  }
+
+  /** Invalidation hook (redaction / m.replace edit): drop any warm cached
+   * plaintext for the event so it can't be rendered stale. */
+  dropCachedClear(eventId: string): void {
+    this.warmClear.delete(eventId);
+  }
+
+  /**
+   * An event's clear content: the SDK's when it has decrypted (the SDK is
+   * always the source of truth), else the warm cached plaintext persisted by
+   * a previous session, else undefined while the event is still opaque.
+   */
+  private clearContentOf(ev: MatrixEvent): IContent | undefined {
+    if (!this.awaitingDecryption(ev)) return ev.getContent();
+    const id = ev.getId();
+    return id ? (this.warmClear.get(id)?.content as IContent | undefined) : undefined;
+  }
+
   /** Build the renderable timeline snapshot (oldest first). */
   timeline(): TimelineItem[] {
     const myUserId = this.client.getUserId()!;
     const events = this.room.getLiveTimeline().getEvents();
+    this.warmFromCache(events);
     const readUpTo = this.frozenMarker;
     const items: TimelineItem[] = [];
     let lastDay = "";
@@ -249,10 +326,17 @@ export class RoomHandle {
       if (type !== EventType.RoomMessage && type !== EventType.RoomMessageEncrypted && type !== "m.sticker") return null;
       return { ...base, kind: "redacted" };
     }
-    if (ev.isDecryptionFailure()) {
-      return { ...base, kind: "encrypted-pending" };
-    }
-    if (ev.isBeingDecrypted() || type === EventType.RoomMessageEncrypted) {
+    if (ev.isDecryptionFailure() || ev.isBeingDecrypted() || type === EventType.RoomMessageEncrypted) {
+      // Read fast-path (issue #4): while the SDK holds no clear content for
+      // this event, render the plaintext persisted by a previous session
+      // instead of the "waiting" placeholder. Display-only accelerator: the
+      // SDK stays the source of truth — the moment it decrypts, this branch
+      // is skipped and the item is built from the SDK's clear event.
+      const cached = base.eventId ? this.warmClear.get(base.eventId) : undefined;
+      if (cached) {
+        const item = this.cachedItem(ev, base, cached, myUserId);
+        if (item !== undefined) return item; // null = hidden (e.g. a cached edit)
+      }
       return { ...base, kind: "encrypted-pending" };
     }
 
@@ -308,6 +392,43 @@ export class RoomHandle {
       return { ...base, kind: type === EventType.RoomMember ? "member" : "state", stateText: text };
     }
     return null;
+  }
+
+  /**
+   * Build a timeline item from a previous session's cached plaintext while
+   * the SDK hasn't (re-)decrypted `ev`. Relations, reactions and receipts
+   * still come from the live SDK event; nothing is injected back into the
+   * SDK (`MatrixEvent.clearEvent` has no supported setter). Returns null when
+   * the cached event renders as nothing (an edit), undefined when it can't be
+   * rendered from cache (caller falls back to the pending placeholder).
+   */
+  private cachedItem(
+    ev: MatrixEvent,
+    base: Pick<TimelineItem, "id" | "eventId" | "sender" | "ts" | "isMine">,
+    cached: CachedClear,
+    myUserId: string,
+  ): TimelineItem | null | undefined {
+    if (cached.type !== EventType.RoomMessage && cached.type !== "m.sticker") return undefined;
+    const content = cached.content as IContent;
+    // Mirror the decrypted path: edits render through their target, and
+    // verification requests are not rendered as chat text.
+    if (content["m.relates_to"]?.rel_type === "m.replace") return null;
+    if (content.msgtype === "m.key.verification.request") {
+      return { ...base, kind: "state", stateText: `${base.sender.name} sent a verification request` };
+    }
+    const body = this.toBody(content, cached.type === "m.sticker");
+    if (!body) return undefined;
+    const thread = base.eventId ? this.room.getThread(base.eventId) : null;
+    return {
+      ...base,
+      kind: "message",
+      body,
+      threadReplyCount: thread && thread.length > 0 ? thread.length : undefined,
+      edited: !!ev.replacingEvent(),
+      replyTo: this.replyContext(content),
+      reactions: this.reactionsFor(ev),
+      receipts: this.receiptsFor(ev, myUserId),
+    };
   }
 
   private buildPoll(ev: MatrixEvent, myUserId: string): PollData | null {
@@ -443,10 +564,13 @@ export class RoomHandle {
     return text ? { msgtype: "m.text", text } : null;
   }
 
-  /** One-line preview of an event's body, redaction/decryption-aware. */
+  /** One-line preview of an event's body, redaction/decryption-aware; falls
+   * back to the warm decrypted cache while the SDK hasn't decrypted yet. */
   private previewOf(ev: MatrixEvent): string {
-    if (ev.isRedacted() || ev.isDecryptionFailure()) return "…";
-    const body = stripReplyFallbackText((ev.getContent().body as string) ?? "attachment");
+    if (ev.isRedacted()) return "…";
+    const content = this.clearContentOf(ev);
+    if (!content) return "…";
+    const body = stripReplyFallbackText((content.body as string) ?? "attachment");
     return (body.split("\n")[0] || "attachment").slice(0, 140);
   }
 
@@ -456,11 +580,10 @@ export class RoomHandle {
     const target = this.room.findEventById(replyId);
     if (!target) return { sender: "", preview: "…", eventId: replyId };
     const member = this.room.getMember(target.getSender() ?? "");
-    const targetContent = target.getContent();
-    const preview =
-      target.isRedacted() || target.isDecryptionFailure()
-        ? "…"
-        : stripReplyFallbackText((targetContent.body as string) ?? "attachment");
+    const targetContent = target.isRedacted() ? undefined : this.clearContentOf(target);
+    const preview = targetContent
+      ? stripReplyFallbackText((targetContent.body as string) ?? "attachment")
+      : "…";
     return {
       sender: member?.name ?? target.getSender() ?? "",
       preview: preview.slice(0, 200),
@@ -598,6 +721,7 @@ export class RoomHandle {
     // make sure it is present at the top.
     const ordered =
       events.some((e) => e.getId() === rootEventId) || !thread.rootEvent ? events : [thread.rootEvent, ...events];
+    this.warmFromCache(ordered);
 
     const items: TimelineItem[] = [];
     const ignored = new Set(this.client.getIgnoredUsers());
@@ -639,7 +763,44 @@ export class RoomHandle {
     }
   }
 
+  /**
+   * Resolve a possibly-local ("~"-prefixed) event id to its confirmed server
+   * id, waiting briefly for the remote echo when the message is still sending.
+   *
+   * An edit target is captured from a timeline item, which may have been
+   * rendered while the original message was still a local echo — its id is
+   * then "~<roomId>:<txnId>". Sending a relation to such an id makes the SDK
+   * call Room.getPendingEvents(), which throws under the default
+   * pendingEventOrdering=chronological. And once the echo arrives the id is
+   * swapped in place, so a stale "~" id can only be re-resolved via the
+   * transaction id embedded in it.
+   */
+  private async resolveEventId(eventId: string): Promise<string> {
+    if (!eventId.startsWith("~")) return eventId;
+    const txnId = eventId.slice(eventId.lastIndexOf(":") + 1);
+    const find = () =>
+      this.room.findEventById(eventId) ??
+      this.room
+        .getLiveTimeline()
+        .getEvents()
+        .find((e) => e.getTxnId() === txnId);
+    // Poll for the remote echo (encrypted rooms can take a few seconds).
+    for (let waited = 0; waited <= 10_000; waited += 250) {
+      const ev = find();
+      const id = ev?.getId();
+      if (id && !id.startsWith("~")) return id;
+      if (!ev || ev.status === EventStatus.NOT_SENT || ev.status === EventStatus.CANCELLED) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    throw new MaterixError(
+      "UNKNOWN",
+      "That message hasn't finished sending yet — try again in a moment.",
+      true,
+    );
+  }
+
   async edit(eventId: string, newText: string): Promise<void> {
+    const targetId = await this.resolveEventId(eventId);
     const html = markdownToMatrixHtml(newText);
     const newContent: IContent = { msgtype: "m.text", body: newText };
     if (html) {
@@ -650,9 +811,13 @@ export class RoomHandle {
       ...newContent,
       body: `* ${newText}`,
       "m.new_content": newContent,
-      "m.relates_to": { rel_type: "m.replace", event_id: eventId },
+      "m.relates_to": { rel_type: "m.replace", event_id: targetId },
     };
-    await this.client.sendMessage(this.roomId, content as never);
+    try {
+      await this.client.sendMessage(this.roomId, content as never);
+    } catch (e) {
+      throw toMaterixError(e, "send");
+    }
   }
 
   async redact(eventId: string): Promise<void> {

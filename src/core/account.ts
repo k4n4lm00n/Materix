@@ -36,6 +36,7 @@ import { CallManager } from "./calls";
 import { readStorageKey } from "./cryptoStoreKey";
 import { Emitter } from "./emitter";
 import { toMaterixError } from "./errors";
+import { DecryptedCache } from "./decryptedCache";
 
 /** Deterministic per-account accent color. */
 function accountColor(key: AccountKey): string {
@@ -60,6 +61,8 @@ export class MatrixAccount {
   cryptoError?: string;
   /** The unlocked crypto-store key (if the account is encrypted), for passcode re-wrapping. */
   storageKey?: Uint8Array<ArrayBuffer>;
+  /** Persistent decrypted-plaintext cache (see decryptedCache.ts, issue #4). */
+  private decryptedCache: DecryptedCache;
   private handles = new Map<string, RoomHandle>();
   private directRooms = new Set<string>();
   /** Client-side per-room settings, synced via io.materix.settings account data. */
@@ -70,6 +73,7 @@ export class MatrixAccount {
     readonly session: SessionData,
   ) {
     this.crypto = new CryptoFacade(key);
+    this.decryptedCache = new DecryptedCache(key);
   }
 
   async start(): Promise<void> {
@@ -105,6 +109,11 @@ export class MatrixAccount {
       });
       this.crypto.attach();
       this.cryptoAvailable = true;
+      // Open the decrypted-plaintext cache (issue #4). Best-effort: a failure
+      // here only means we fall back to normal per-launch re-decryption.
+      this.decryptedCache.open().catch((err) =>
+        console.warn(`decrypted cache open failed for ${this.session.userId}`, err),
+      );
     } catch (e) {
       // Crypto init failed — most often the device's WebView is too old to run
       // the crypto WASM (needs WebAssembly reference-types, Chromium 96+), but
@@ -142,10 +151,25 @@ export class MatrixAccount {
       if (prev !== this.syncState) this.events.emit("self");
       bumpRooms();
     });
-    c.on(RoomEvent.Timeline, (_ev, room) => bumpRoom(room));
+    c.on(RoomEvent.Timeline, (ev, room) => {
+      // Edit invalidation (issue #4): an m.replace supersedes its target's
+      // content, so the target's cached plaintext must go — better to
+      // re-decrypt than resurrect a stale pre-edit body. The relation is
+      // cleartext even on encrypted events, so this fires before the edit
+      // itself is decrypted (and again from stored sync on every cold start).
+      const rel = ev.getRelation();
+      if (rel?.rel_type === "m.replace" && rel.event_id) this.evictCached(rel.event_id, ev.getRoomId());
+      bumpRoom(room);
+    });
     c.on(RoomEvent.LocalEchoUpdated, (_ev, room) => bumpRoom(room));
     c.on(RoomEvent.Receipt, (_ev, room) => bumpRoom(room));
-    c.on(RoomEvent.Redaction, (_ev, room) => bumpRoom(room));
+    c.on(RoomEvent.Redaction, (ev, room) => {
+      // Drop any cached plaintext for the redacted target so we never resurrect
+      // redacted content from the decrypted cache.
+      const targetId = ev.getAssociatedId();
+      if (targetId) this.evictCached(targetId, room?.roomId ?? ev.getRoomId());
+      bumpRoom(room);
+    });
     // Explicit marked-unread flag (MSC2867) arrives as room account data.
     c.on(RoomEvent.AccountData, (ev, room) => {
       const type = ev.getType();
@@ -156,7 +180,16 @@ export class MatrixAccount {
     c.on(RoomEvent.Tags, () => bumpRooms());
     c.on(RoomMemberEvent.Typing, (_ev, member) => bumpRoom(c.getRoom(member.roomId)));
     c.on(RoomStateEvent.Events, (ev) => bumpRoom(c.getRoom(ev.getRoomId() ?? undefined)));
-    c.on(MatrixEventEvent.Decrypted, (ev) => bumpRoom(c.getRoom(ev.getRoomId() ?? undefined)));
+    c.on(MatrixEventEvent.Decrypted, (ev) => {
+      // An edit that only reveals its m.replace relation once decrypted still
+      // invalidates its target (usually already caught cleartext in Timeline).
+      const rel = ev.getRelation();
+      if (rel?.rel_type === "m.replace" && rel.event_id) this.evictCached(rel.event_id, ev.getRoomId());
+      // Persist the freshly-decrypted plaintext so a future cold launch can skip
+      // re-decrypting it (issue #4). No-op on decryption failure (see record()).
+      this.decryptedCache.record(ev);
+      bumpRoom(c.getRoom(ev.getRoomId() ?? undefined));
+    });
     // Live-location beacons: re-render on new position / liveness change.
     c.on(BeaconEvent.New as never, ((_ev: unknown, beacon: { roomId: string }) =>
       bumpRoom(c.getRoom(beacon.roomId))) as never);
@@ -414,12 +447,24 @@ export class MatrixAccount {
     return undefined;
   }
 
+  /** Drop an event's cached plaintext everywhere: the persistent row and any
+   * warm in-memory copy held by the room's handle (issue #4 invalidation). */
+  private evictCached(eventId: string, roomId?: string | null): void {
+    this.decryptedCache.evict(eventId);
+    if (roomId) this.handles.get(roomId)?.dropCachedClear(eventId);
+  }
+
   room(roomId: string): RoomHandle {
     let h = this.handles.get(roomId);
     if (!h) {
       const room = this.client.getRoom(roomId);
       if (!room) throw new Error(`unknown room ${roomId}`);
-      h = new RoomHandle(this.client, room);
+      // The decrypted cache + a render bump let the handle serve the issue #4
+      // read fast-path (cached plaintext while the SDK re-decrypts).
+      h = new RoomHandle(this.client, room, this.decryptedCache, () => {
+        this.events.emit(`room:${roomId}`);
+        this.events.emit("rooms");
+      });
       this.handles.set(roomId, h);
     }
     return h;
@@ -638,6 +683,7 @@ export class MatrixAccount {
 
   async stop(): Promise<void> {
     this.client?.stopClient();
+    this.decryptedCache.close();
   }
 
   /** Sign out server-side (best effort) and destroy every local store. */
@@ -658,5 +704,8 @@ export class MatrixAccount {
       // best effort
     }
     indexedDB.deleteDatabase(`materix-crypto-${this.key}::matrix-sdk-crypto`);
+    // Wipe cached plaintext on sign-out (privacy: never outlive the session).
+    this.decryptedCache.close();
+    indexedDB.deleteDatabase(`materix-decrypted-${this.key}`);
   }
 }

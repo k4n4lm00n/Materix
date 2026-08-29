@@ -2,6 +2,7 @@
 
 import type { MatrixAccount } from "../core/account";
 import { uiBus } from "./bus";
+import { copyText } from "./clipboard";
 import type { MenuItem } from "./components/ContextMenu";
 
 /** Success-toast text for a completed power-level change. */
@@ -72,7 +73,7 @@ export function buildUserMenu(
   items.push({
     label: "Copy user ID",
     onClick: () => {
-      navigator.clipboard.writeText(userId).then(() => opts.show("User ID copied."));
+      copyText(userId).then(() => opts.show("User ID copied."), opts.showError);
     },
   });
   if (userId !== me) {
