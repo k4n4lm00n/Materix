@@ -186,4 +186,37 @@ open(p, 'w').write(s)
 print("apply-android-push: MainActivity back-to-JS handler added")
 PY
 
+# 6. MainActivity: notification tap deep-link (onNewIntent) ------------------
+# A tapped grouped notification (MaterixPush.roomIntent) re-delivers the launch
+# intent with materix.roomId/materix.accountKey extras. Forward them into the
+# page as a "materix-notif-open" event; src/ui/push.ts opens the room. The
+# launch intent is singleTop, so a running app gets onNewIntent (not a fresh
+# onCreate).
+python3 - "$MA" <<'PY'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+if 'materix.roomId' in s:
+    print("apply-android-push: MainActivity onNewIntent deep-link already present"); sys.exit(0)
+s, n = re.subn(
+    r'(class MainActivity : TauriActivity\(\) \{\n)',
+    r'\1'
+    '  // A tapped grouped notification re-delivers the launch intent with the\n'
+    '  // room deep-link extras; forward them to the page (see src/ui/push.ts).\n'
+    '  override fun onNewIntent(intent: android.content.Intent) {\n'
+    '    super.onNewIntent(intent)\n'
+    '    setIntent(intent)\n'
+    '    val roomId = intent.getStringExtra("materix.roomId")\n'
+    '    if (roomId != null) {\n'
+    '      val accountKey = intent.getStringExtra("materix.accountKey") ?: ""\n'
+    '      val json = org.json.JSONObject()\n'
+    '        .put("roomId", roomId).put("accountKey", accountKey).toString()\n'
+    '      MaterixPush.dispatchToJs("materix-notif-open", json)\n'
+    '    }\n'
+    '  }\n\n',
+    s, count=1)
+assert n == 1, "could not find MainActivity class body to add onNewIntent"
+open(p, 'w').write(s)
+print("apply-android-push: MainActivity onNewIntent deep-link added")
+PY
+
 echo "apply-android-push: done"

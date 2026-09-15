@@ -41,17 +41,20 @@ class MaterixUnifiedPushReceiver : MessagingReceiver() {
         } else {
             // Dead process: we can't decrypt here. Wake the user with a generic
             // notification; opening the app syncs and shows the message.
-            val (title, body) = summarize(text)
-            MaterixPush.notifyGeneric(context, title, body)
+            val (title, body, unread) = summarize(text)
+            MaterixPush.notifyGeneric(context, title, body, unread)
         }
     }
 
     /**
-     * Best-effort title from the Matrix push-gateway payload. With the
-     * `event_id_only` pusher format the payload carries no content, so this is
-     * usually just "Materix" / "New message".
+     * Best-effort title + running count from the Matrix push-gateway payload.
+     * With the `event_id_only` pusher format the payload carries no content, so
+     * title is usually just "Materix" / "New message" — but the homeserver MAY
+     * include `counts.unread`, a real running total for that account, which we
+     * surface as "N new messages" (see MaterixPush.notifyGeneric). `unread` is
+     * null when the (spec-optional) field is absent.
      */
-    private fun summarize(text: String): Pair<String, String> {
+    private fun summarize(text: String): Triple<String, String, Int?> {
         return try {
             val n = JSONObject(text).optJSONObject("notification")
             // sender_display_name / room_name are attacker-influenced (a sender
@@ -60,9 +63,15 @@ class MaterixUnifiedPushReceiver : MessagingReceiver() {
             // clamp the length before showing them as a notification title.
             val sender = n?.optString("sender_display_name")?.takeIf { it.isNotEmpty() }?.let(::clean)
             val room = n?.optString("room_name")?.takeIf { it.isNotEmpty() }?.let(::clean)
-            Pair(sender ?: room ?: "Materix", "New message")
+            val counts = n?.optJSONObject("counts")
+            val unread = if (counts != null && counts.has("unread")) {
+                counts.optInt("unread").takeIf { it > 0 }
+            } else {
+                null
+            }
+            Triple(sender ?: room ?: "Materix", "New message", unread)
         } catch (_: Throwable) {
-            Pair("Materix", "New message")
+            Triple("Materix", "New message", null)
         }
     }
 

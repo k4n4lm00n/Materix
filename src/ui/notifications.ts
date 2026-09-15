@@ -14,9 +14,51 @@ import { ClientEvent, RoomEvent, type MatrixClient, type MatrixEvent, type Room 
 import { SyncState } from "matrix-js-sdk";
 import { getPrefs, resolveSound } from "./prefs";
 import { playSound } from "./sounds";
-import { channelFor, isAndroid, isTauri, loadTauriNotification } from "./notifyChannels";
+import { channelFor, ensureAccountChannel, isAndroid, isTauri, loadTauriNotification } from "./notifyChannels";
+import {
+  createGroupingState,
+  reduceIncoming,
+  reduceRoomViewed,
+  type PrivacyMode,
+} from "./notifyGrouping";
+import type { MaterixPushNative } from "./push";
 
 let requested = false;
+
+// Session-scoped tally for Android grouped notifications. The Kotlin notifier
+// is stateless (see notifyGrouping.ts / MaterixPush.kt); JS owns the running
+// "since last viewed" counts and sends the full desired state on every post.
+const groupingState = createGroupingState();
+
+/** The native bridge if present (Android build with apply-android-push.sh).
+ * We only need the grouped-notification methods here; they are optional on
+ * older bridge builds, so callers feature-detect before use. */
+function nativeNotifier(): MaterixPushNative | null {
+  const n = (window as unknown as { MaterixPushNative?: MaterixPushNative }).MaterixPushNative;
+  return n ?? null;
+}
+
+/**
+ * A room became visible (opened/read): zero its Android notification tally and
+ * clear/repost the account summary. No-op off Android or without the native
+ * grouped-notification bridge. Wired from App.tsx's selection effect.
+ */
+export function onRoomViewed(accountKey: string, roomId: string): void {
+  if (!isAndroid) return;
+  const bridge = nativeNotifier();
+  if (!bridge?.clearRoom) return;
+  const { clear } = reduceRoomViewed(groupingState, accountKey, roomId);
+  if (!clear) return;
+  // The summary (if it needs re-posting) goes through the per-account channel,
+  // which was already ensured when notifications were wired.
+  void ensureAccountChannel(accountKey, clear.accountLabel).then((channelId) => {
+    try {
+      bridge.clearRoom?.(JSON.stringify({ ...clear, ...(channelId ? { channelId } : {}) }));
+    } catch (e) {
+      console.warn("materix: clearing grouped notification failed", e);
+    }
+  });
+}
 
 async function ensureWebPermission(): Promise<boolean> {
   if (!("Notification" in window)) return false;
@@ -98,6 +140,40 @@ export function wireNotifications(
     const title = room.name === sender ? sender : `${sender} · ${room.name}`;
 
     if (isTauri) {
+      // Android with the native grouped-notification bridge: route through our
+      // Kotlin notifier so messages bundle per account with a running count and
+      // re-alert every time (the plugin hardcodes setOnlyAlertOnce(true) and
+      // drops setNumber). Feature-detected; falls back to the plugin below when
+      // the bridge is absent (dev/sideload) or throws.
+      if (isAndroid) {
+        const bridge = nativeNotifier();
+        if (bridge?.notifyMessage) {
+          try {
+            const channelId = await channelFor(
+              accountKey,
+              client.getUserId() ?? accountKey,
+              room.roomId,
+              room.name,
+            );
+            const { payload } = reduceIncoming(groupingState, {
+              accountKey,
+              accountLabel: client.getUserId() ?? accountKey,
+              roomId: room.roomId,
+              roomName: room.name,
+              sender,
+              body,
+              title,
+              mode: mode as PrivacyMode,
+              channelId,
+            });
+            bridge.notifyMessage(JSON.stringify(payload));
+            return;
+          } catch (e) {
+            // Bridge threw — fall through to the plugin path unchanged.
+            console.warn("materix: native grouped notification failed; falling back", e);
+          }
+        }
+      }
       try {
         const { sendNotification } = await loadTauriNotification();
         // Android: post through the per-room/per-account channel so the right
