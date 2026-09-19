@@ -138,6 +138,17 @@ export async function readStorageKey(
   }
 }
 
+/**
+ * Whether ANY at-rest key record exists for this account, unlockable or not.
+ * DATA-SAFETY: MatrixAccount.start uses this as a gate — when a record exists
+ * but readStorageKey() returned null (passcode cancelled, unreadable record),
+ * the encrypted crypto store must not be opened keyless; crypto init fails up
+ * front and the session runs against the separate clear-text fallback store.
+ */
+export async function hasStorageKeyRecord(accountKey: string): Promise<boolean> {
+  return (await secretGet(PREFIX + accountKey)) != null;
+}
+
 export async function hasPasscode(accountKey: string): Promise<boolean> {
   const raw = await secretGet(PREFIX + accountKey);
   return !!raw && !!parsePasscodeRecord(raw);

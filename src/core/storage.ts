@@ -76,7 +76,10 @@ export async function loadSessions(): Promise<Map<string, SessionData>> {
     try {
       out.set(short, JSON.parse(localStorage.getItem(k)!) as SessionData);
     } catch {
-      localStorage.removeItem(k);
+      // DATA-SAFETY: do NOT delete the record on a parse failure. A transient
+      // half-written value (e.g. a WebView killed mid-write) would otherwise
+      // permanently sign the user out. Skip it for this launch only.
+      console.warn(`Skipping unreadable session record ${k}`);
     }
   }
   return out;

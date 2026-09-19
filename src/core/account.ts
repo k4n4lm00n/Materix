@@ -34,7 +34,7 @@ import { receiptIncludesUser } from "./readReceipt";
 import { previewText } from "./markdown";
 import { CryptoFacade } from "./crypto";
 import { CallManager } from "./calls";
-import { readStorageKey } from "./cryptoStoreKey";
+import { hasStorageKeyRecord, readStorageKey } from "./cryptoStoreKey";
 import { Emitter } from "./emitter";
 import { toMaterixError } from "./errors";
 import { DecryptedCache } from "./decryptedCache";
@@ -93,17 +93,47 @@ export class MatrixAccount {
   }
 
   async start(): Promise<void> {
-    const store = new IndexedDBStore({
-      indexedDB: window.indexedDB,
-      dbName: `materix-sync-${this.key}`,
-    });
+    // =========================================================================
+    // DATA-SAFETY INVARIANT — do not reorder this method without re-reading this.
+    //
+    // Unless the user EXPLICITLY deletes local data (destroy(), below), nothing
+    // in this app may ever delete, reset, truncate, migrate or overwrite the
+    // crypto-backed data-store namespace (`materix-sync-<key>` and
+    // `materix-crypto-<key>*`). Concretely:
+    //
+    //  1. The crypto init outcome is decided FIRST, before any sync store is
+    //     opened. Only a session whose crypto engine actually initialised may
+    //     open the canonical `materix-sync-<key>` store.
+    //  2. If crypto init fails for ANY reason (old WebView that can't run the
+    //     crypto WASM, store-open error, locked at-rest key, ...), the session
+    //     falls back to a SEPARATE clear-text store, `materix-sync-plain-<key>`.
+    //     The crypto-backed namespace is left byte-for-byte untouched — not
+    //     opened, not written, not migrated — so a later launch on a working
+    //     build finds it exactly as the last healthy session left it.
+    //     (Opening it here would be destructive twice over: the crypto-less
+    //     sync loop would advance the sync token past to-device room-key
+    //     messages, permanently losing them; and matrix-js-sdk's IndexedDBStore
+    //     DELETES its whole database whenever an IndexedDB op errors — see
+    //     `degradable()` in the SDK — which on the flaky old WebViews that
+    //     break crypto in the first place can wipe the store outright.)
+    //  3. The two namespaces never migrate into each other, in either
+    //     direction. The fallback store is disposable; the crypto one is not.
+    //  4. When an at-rest key record exists but cannot be unlocked, the
+    //     encrypted crypto store must NOT be opened keyless "to see what
+    //     happens" — we fail crypto init up front instead (see the gate below).
+    // =========================================================================
+
+    // The client is created WITHOUT a persistent store (the SDK substitutes an
+    // in-memory stub) so the crypto outcome can pick the namespace before any
+    // IndexedDB database is opened. The real store is bound right after —
+    // MatrixClient's `store` setter re-wires setUserCreator, and only
+    // startClient() (called last) actually needs it.
     this.client = createClient({
       baseUrl: this.session.homeserverUrl,
       accessToken: this.session.accessToken,
       refreshToken: this.session.refreshToken,
       userId: this.session.userId,
       deviceId: this.session.deviceId,
-      store,
       timelineSupport: true,
       // Per-account callbacks so a recovery key entered on one account can never
       // be handed to another account's crypto (see CryptoFacade).
@@ -111,9 +141,9 @@ export class MatrixAccount {
     });
     this.crypto.bind(this.client);
     // The getter defers the read: crypto init only settles below, after bind.
+    // (The sync store is bound + started AFTER the crypto outcome — see below —
+    // so it is not opened here.)
     this.calls.bind(this.client, () => this.cryptoAvailable);
-    // Must run after the store is assigned to the client (SDK requirement).
-    await store.startup();
 
     try {
       // Encrypt the crypto store at rest ONLY when a key exists for this account
@@ -122,6 +152,16 @@ export class MatrixAccount {
       // migration of an existing store. Same db prefix, no deletion.
       const storageKey = await readStorageKey(this.key);
       this.storageKey = storageKey ?? undefined;
+      // SAFETY GATE (invariant #4): a key record exists but couldn't be
+      // unlocked (passcode cancelled / unreadable record). The crypto store on
+      // disk is encrypted with that key; opening it without the key cannot
+      // succeed and must not be attempted — it would open the encrypted store
+      // for writing. Fail crypto init here, before any store is touched.
+      if (!storageKey && (await hasStorageKeyRecord(this.key))) {
+        throw new Error(
+          "crypto-store key exists but was not unlocked; refusing to open the encrypted store without it",
+        );
+      }
       await this.client.initRustCrypto({
         cryptoDatabasePrefix: `materix-crypto-${this.key}`,
         ...(storageKey ? { storageKey } : {}),
@@ -144,6 +184,19 @@ export class MatrixAccount {
       console.error(`rust crypto init failed for ${this.session.userId}`, e);
       this.events.emit("self");
     }
+
+    // Bind the sync store for the namespace matching the crypto outcome
+    // (invariants #1/#2): canonical store only when crypto is up; otherwise the
+    // separate, disposable clear-text fallback. NEVER unify these names.
+    const store = new IndexedDBStore({
+      indexedDB: window.indexedDB,
+      dbName: this.cryptoAvailable
+        ? `materix-sync-${this.key}`
+        : `materix-sync-plain-${this.key}`,
+    });
+    this.client.store = store;
+    // Must run after the store is assigned to the client (SDK requirement).
+    await store.startup();
 
     this.wireListeners();
     await this.client.startClient({ initialSyncLimit: 20 });
@@ -863,7 +916,16 @@ export class MatrixAccount {
     this.decryptedCache.close();
   }
 
-  /** Sign out server-side (best effort) and destroy every local store. */
+  /**
+   * Sign out server-side (best effort) and destroy every local store.
+   *
+   * DATA-SAFETY: this is the ONLY place the app may delete local data-stores,
+   * and it runs solely on an explicit user sign-out (manager.logout). It
+   * removes BOTH sync namespaces — the crypto-backed `materix-sync-<key>` and
+   * the clear-text fallback `materix-sync-plain-<key>` (see start()) — plus
+   * the rust crypto databases. No other code path may delete or clear any of
+   * these.
+   */
   async destroy(): Promise<void> {
     try {
       await this.client.logout(true);
@@ -880,7 +942,13 @@ export class MatrixAccount {
     } catch {
       // best effort
     }
+    // client.store only covers whichever sync namespace this session was bound
+    // to; explicitly remove both, and both rust crypto dbs (clearStores() only
+    // knows the SDK's default crypto prefix, not ours).
+    indexedDB.deleteDatabase(`materix-sync-${this.key}`);
+    indexedDB.deleteDatabase(`materix-sync-plain-${this.key}`);
     indexedDB.deleteDatabase(`materix-crypto-${this.key}::matrix-sdk-crypto`);
+    indexedDB.deleteDatabase(`materix-crypto-${this.key}::matrix-sdk-crypto-meta`);
     // Wipe cached plaintext on sign-out (privacy: never outlive the session).
     this.decryptedCache.close();
     indexedDB.deleteDatabase(`materix-decrypted-${this.key}`);
