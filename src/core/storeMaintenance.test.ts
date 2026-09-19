@@ -5,6 +5,10 @@ vi.mock("./idbUtil", () => ({
   probeSyncStore: vi.fn(),
   copyDatabase: vi.fn().mockResolvedValue(undefined),
   rawDeleteDatabase: vi.fn().mockResolvedValue(undefined),
+  // Name helpers are pure — keep the real prefixing so the maintenance code
+  // operates on the SDK-prefixed sync names it will use in production.
+  syncDbName: (key: string) => `matrix-js-sdk:materix-sync-${key}`,
+  archivedSyncDbName: (key: string) => `matrix-js-sdk:materix-sync-archived-${key}`,
 }));
 
 import {
@@ -14,10 +18,12 @@ import {
 } from "./storeMaintenance";
 import { copyDatabase, listDatabaseNames, probeSyncStore, rawDeleteDatabase } from "./idbUtil";
 
-const SYNC = "materix-sync-k1";
+// Sync store names carry the SDK's "matrix-js-sdk:" prefix (raw indexedDB ops);
+// the rust-crypto dbs do not.
+const SYNC = "matrix-js-sdk:materix-sync-k1";
 const CRYPTO = "materix-crypto-k1::matrix-sdk-crypto";
 const CRYPTO_META = "materix-crypto-k1::matrix-sdk-crypto-meta";
-const ARCH_SYNC = "materix-sync-archived-k1";
+const ARCH_SYNC = "matrix-js-sdk:materix-sync-archived-k1";
 
 beforeEach(() => {
   vi.mocked(listDatabaseNames).mockReset();

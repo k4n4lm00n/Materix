@@ -171,8 +171,10 @@ describe("MatrixAccount.start data-store routing", () => {
     const deleted = idb.deleteDatabase.mock.calls.map((c) => c[0]);
     expect(deleted).toEqual(
       expect.arrayContaining([
-        "materix-sync-k1",
-        "materix-sync-plain-k1",
+        // Sync stores are deleted by their SDK-prefixed real name...
+        "matrix-js-sdk:materix-sync-k1",
+        "matrix-js-sdk:materix-sync-plain-k1",
+        // ...the rust-crypto dbs are unprefixed.
         "materix-crypto-k1::matrix-sdk-crypto",
         "materix-crypto-k1::matrix-sdk-crypto-meta",
       ]),
