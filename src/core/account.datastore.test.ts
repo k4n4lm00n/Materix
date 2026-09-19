@@ -24,15 +24,6 @@ let client = fakeClient();
 
 vi.mock("matrix-js-sdk", () => ({
   createClient: vi.fn(() => client),
-  IndexedDBStore: class {
-    dbName: string;
-    startup = vi.fn().mockResolvedValue(undefined);
-    deleteAllData = vi.fn().mockResolvedValue(undefined);
-    constructor(opts: { dbName: string }) {
-      this.dbName = opts.dbName;
-      constructedStores.push(this as never);
-    }
-  },
   BeaconEvent: {},
   ClientEvent: {},
   EventType: {},
@@ -41,6 +32,22 @@ vi.mock("matrix-js-sdk", () => ({
   RoomMemberEvent: {},
   RoomStateEvent: {},
   SyncState: {},
+}));
+vi.mock("./nonDestructiveStore", () => ({
+  NonDestructiveIndexedDBStore: class {
+    dbName: string;
+    startup = vi.fn().mockResolvedValue(undefined);
+    deleteAllData = vi.fn().mockResolvedValue(undefined);
+    constructor(opts: { dbName: string }) {
+      this.dbName = opts.dbName;
+      constructedStores.push(this as never);
+    }
+  },
+}));
+vi.mock("./storeMaintenance", () => ({
+  detectCanonicalStoreCorruption: vi.fn().mockResolvedValue(false),
+  archiveCanonicalStores: vi.fn().mockResolvedValue(undefined),
+  deleteCanonicalStores: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("matrix-js-sdk/lib/crypto-api/CryptoEvent", () => ({ CryptoEvent: {} }));
 // account.ts transitively pulls roomHandle → markdown → DOMPurify, which needs
@@ -66,6 +73,11 @@ vi.mock("./cryptoStoreKey", () => ({
 
 import { MatrixAccount } from "./account";
 import { hasStorageKeyRecord, readStorageKey } from "./cryptoStoreKey";
+import {
+  archiveCanonicalStores,
+  deleteCanonicalStores,
+  detectCanonicalStoreCorruption,
+} from "./storeMaintenance";
 import type { SessionData } from "./types";
 
 const session: SessionData = {
@@ -80,6 +92,9 @@ beforeEach(() => {
   client = fakeClient();
   vi.mocked(readStorageKey).mockResolvedValue(null);
   vi.mocked(hasStorageKeyRecord).mockResolvedValue(false);
+  vi.mocked(detectCanonicalStoreCorruption).mockClear().mockResolvedValue(false);
+  vi.mocked(archiveCanonicalStores).mockClear().mockResolvedValue(undefined);
+  vi.mocked(deleteCanonicalStores).mockClear().mockResolvedValue(undefined);
   const deleteDatabase = vi.fn();
   (globalThis as Record<string, unknown>).indexedDB = { deleteDatabase };
   (globalThis as Record<string, unknown>).window = globalThis;
@@ -162,5 +177,55 @@ describe("MatrixAccount.start data-store routing", () => {
         "materix-crypto-k1::matrix-sdk-crypto-meta",
       ]),
     );
+  });
+});
+
+describe("MatrixAccount corruption detection + recovery", () => {
+  it("crypto OK: never probes for corruption (canonical store opened cleanly)", async () => {
+    const acc = new MatrixAccount("k1", session);
+    await acc.start();
+    expect(detectCanonicalStoreCorruption).not.toHaveBeenCalled();
+    expect(acc.storeCorruption).toBe(false);
+  });
+
+  it("crypto failed + probe flags divergence: sets storeCorruption, but moves/deletes NOTHING", async () => {
+    client.initRustCrypto.mockRejectedValue(new Error("wasm"));
+    vi.mocked(detectCanonicalStoreCorruption).mockResolvedValue(true);
+    const acc = new MatrixAccount("k1", session);
+    await acc.start();
+
+    expect(detectCanonicalStoreCorruption).toHaveBeenCalledWith("k1");
+    expect(acc.storeCorruption).toBe(true);
+    // Detection is READ-ONLY: no archive, no delete until the user chooses.
+    expect(archiveCanonicalStores).not.toHaveBeenCalled();
+    expect(deleteCanonicalStores).not.toHaveBeenCalled();
+    const idb = (globalThis as Record<string, unknown>).indexedDB as { deleteDatabase: ReturnType<typeof vi.fn> };
+    expect(idb.deleteDatabase).not.toHaveBeenCalled();
+    // App still ran on the clear-text fallback.
+    expect(constructedStores.map((s) => s.dbName)).toEqual(["materix-sync-plain-k1"]);
+  });
+
+  it("archiveCorruptedStore() archives then clears the flag", async () => {
+    client.initRustCrypto.mockRejectedValue(new Error("wasm"));
+    vi.mocked(detectCanonicalStoreCorruption).mockResolvedValue(true);
+    const acc = new MatrixAccount("k1", session);
+    await acc.start();
+    await acc.archiveCorruptedStore();
+
+    expect(archiveCanonicalStores).toHaveBeenCalledWith("k1");
+    expect(deleteCanonicalStores).not.toHaveBeenCalled();
+    expect(acc.storeCorruption).toBe(false);
+  });
+
+  it("deleteCorruptedStore() deletes then clears the flag", async () => {
+    client.initRustCrypto.mockRejectedValue(new Error("wasm"));
+    vi.mocked(detectCanonicalStoreCorruption).mockResolvedValue(true);
+    const acc = new MatrixAccount("k1", session);
+    await acc.start();
+    await acc.deleteCorruptedStore();
+
+    expect(deleteCanonicalStores).toHaveBeenCalledWith("k1");
+    expect(archiveCanonicalStores).not.toHaveBeenCalled();
+    expect(acc.storeCorruption).toBe(false);
   });
 });

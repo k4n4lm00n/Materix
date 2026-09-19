@@ -8,6 +8,7 @@ import { applyTheme } from "./ui/theme";
 import { ToastProvider } from "./ui/components/Toast";
 import { ConfirmProvider } from "./ui/components/Confirm";
 import { CryptoGate } from "./ui/CryptoGate";
+import { StoreCorruptionGate } from "./ui/StoreCorruptionGate";
 import { Onboarding } from "./ui/Onboarding";
 import { AccountRail, RoomListPane, type ListView, type NewChatTab, type Selection } from "./ui/RoomList";
 import { ChatPane } from "./ui/ChatPane";
@@ -254,6 +255,7 @@ export function App() {
         <CallOverlay />
         <PasscodeGate />
         <CryptoGate />
+        <StoreCorruptionGate />
 
         {dialog.kind === "new-chat" && (
           <NewChatDialog

@@ -5,7 +5,6 @@ import {
   BeaconEvent,
   ClientEvent,
   EventType,
-  IndexedDBStore,
   MatrixEventEvent,
   RoomEvent,
   RoomMemberEvent,
@@ -16,6 +15,12 @@ import {
   type MatrixClient,
   type Room,
 } from "matrix-js-sdk";
+import { NonDestructiveIndexedDBStore } from "./nonDestructiveStore";
+import {
+  archiveCanonicalStores,
+  deleteCanonicalStores,
+  detectCanonicalStoreCorruption,
+} from "./storeMaintenance";
 import { CryptoEvent } from "matrix-js-sdk/lib/crypto-api/CryptoEvent";
 import type {
   AccountInfo,
@@ -60,6 +65,12 @@ export class MatrixAccount {
    *  loudly and refuses to continue without explicit user acknowledgement. */
   cryptoAvailable = true;
   cryptoError?: string;
+  /** True when the canonical crypto-backed data-store looks corrupted /
+   *  half-written (a divergence a past crypto-failed session left behind).
+   *  Set read-only by detection during start(); the UI (StoreCorruptionGate)
+   *  then offers the user an explicit ARCHIVE or DELETE. Never acted on
+   *  automatically. */
+  storeCorruption = false;
   /** The unlocked crypto-store key (if the account is encrypted), for passcode re-wrapping. */
   storageKey?: Uint8Array<ArrayBuffer>;
   /** Persistent decrypted-plaintext cache (see decryptedCache.ts, issue #4). */
@@ -185,10 +196,29 @@ export class MatrixAccount {
       this.events.emit("self");
     }
 
+    // When crypto failed we did NOT open the canonical store; probe it
+    // READ-ONLY for the divergence/half-written state a past crypto-failed
+    // session leaves behind. Detection only flags — nothing is moved or deleted
+    // until the user explicitly chooses in StoreCorruptionGate. (When crypto
+    // succeeded the canonical store was opened cleanly, so it is consistent by
+    // definition and we skip the probe.)
+    if (!this.cryptoAvailable) {
+      try {
+        this.storeCorruption = await detectCanonicalStoreCorruption(this.key);
+        if (this.storeCorruption) this.events.emit("self");
+      } catch (e) {
+        // A failed probe must never itself be treated as corruption/loss.
+        console.warn(`store-corruption probe failed for ${this.session.userId}`, e);
+      }
+    }
+
     // Bind the sync store for the namespace matching the crypto outcome
     // (invariants #1/#2): canonical store only when crypto is up; otherwise the
-    // separate, disposable clear-text fallback. NEVER unify these names.
-    const store = new IndexedDBStore({
+    // separate, disposable clear-text fallback. NEVER unify these names. The
+    // store subclass also makes the invariant absolute: it suppresses
+    // matrix-js-sdk's auto-delete-on-degrade so an IndexedDB hiccup can never
+    // wipe the on-disk store (see NonDestructiveIndexedDBStore).
+    const store = new NonDestructiveIndexedDBStore({
       indexedDB: window.indexedDB,
       dbName: this.cryptoAvailable
         ? `materix-sync-${this.key}`
@@ -914,6 +944,30 @@ export class MatrixAccount {
   async stop(): Promise<void> {
     this.client?.stopClient();
     this.decryptedCache.close();
+  }
+
+  /**
+   * User chose ARCHIVE for a detected corrupted store: move the canonical
+   * crypto-backed store(s) aside to a preserved, inspectable slot (copy then
+   * delete — never silently discarded), leaving the live clear-text fallback
+   * untouched. Explicit-user-action only.
+   */
+  async archiveCorruptedStore(): Promise<void> {
+    await archiveCanonicalStores(this.key);
+    this.storeCorruption = false;
+    this.events.emit("self");
+  }
+
+  /**
+   * User chose DELETE for a detected corrupted store: remove the canonical
+   * crypto-backed store(s) only (same allowlist semantics as destroy(), scoped
+   * to the crypto-backed namespace — the live clear-text fallback is kept).
+   * Explicit-user-action only.
+   */
+  async deleteCorruptedStore(): Promise<void> {
+    await deleteCanonicalStores(this.key);
+    this.storeCorruption = false;
+    this.events.emit("self");
   }
 
   /**
