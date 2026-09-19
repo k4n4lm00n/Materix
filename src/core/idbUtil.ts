@@ -8,6 +8,37 @@
 // (opening an absent DB would create it). deleteDatabase is only ever called by
 // the explicit, user-initiated paths in storeMaintenance / account.destroy().
 
+// ---------------------------------------------------------------------------
+// SINGLE SOURCE OF TRUTH for sync-store database names.
+//
+// matrix-js-sdk's LocalIndexedDBStoreBackend UNCONDITIONALLY prepends this
+// prefix to every dbName it is given:
+//   node_modules/matrix-js-sdk/lib/store/indexeddb-local-backend.js
+//   → `this.dbName = "matrix-js-sdk:" + dbName;`  (currently ~line 145)
+// account.ts passes no `workerFactory`, so this local backend is always used.
+//
+// Therefore a sync store created via the SDK (IndexedDBStore /
+// NonDestructiveIndexedDBStore) is handed the UNPREFIXED *suffix* and the SDK
+// adds the prefix; but any code here that touches the SAME store through the
+// RAW `indexedDB` API (probe/copy/delete) must use the FULLY-PREFIXED name, or
+// it silently operates on a database that does not exist. Both forms are
+// derived from the one `IDB_PREFIX` below so they can never drift again.
+//
+// NB: the rust-crypto databases (`materix-crypto-<key>::matrix-sdk-crypto[-meta]`)
+// are NOT SDK sync stores and do NOT get this prefix — leave those unprefixed.
+export const IDB_PREFIX = "matrix-js-sdk:";
+
+/** Unprefixed suffix handed to the SDK store constructor (SDK adds IDB_PREFIX). */
+export const syncDbSuffix = (key: string): string => `materix-sync-${key}`;
+export const plainSyncDbSuffix = (key: string): string => `materix-sync-plain-${key}`;
+export const archivedSyncDbSuffix = (key: string): string => `materix-sync-archived-${key}`;
+
+/** Fully-prefixed names as they actually exist in IndexedDB — use these for any
+ *  RAW indexedDB probe/copy/delete of a sync store. */
+export const syncDbName = (key: string): string => IDB_PREFIX + syncDbSuffix(key);
+export const plainSyncDbName = (key: string): string => IDB_PREFIX + plainSyncDbSuffix(key);
+export const archivedSyncDbName = (key: string): string => IDB_PREFIX + archivedSyncDbSuffix(key);
+
 /** List existing IndexedDB database names, or null if the browser can't (old
  *  Firefox / no `databases()` support). Purely read-only. */
 export async function listDatabaseNames(): Promise<string[] | null> {

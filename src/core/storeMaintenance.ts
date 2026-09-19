@@ -8,15 +8,27 @@
 // StoreCorruptionGate. Neither touches the clear-text fallback
 // (`materix-sync-plain-<key>`), which is the live session's store.
 
-import { copyDatabase, listDatabaseNames, probeSyncStore, rawDeleteDatabase } from "./idbUtil";
+import {
+  archivedSyncDbName,
+  copyDatabase,
+  listDatabaseNames,
+  probeSyncStore,
+  rawDeleteDatabase,
+  syncDbName,
+} from "./idbUtil";
 
 // Canonical (crypto-backed) namespace, kept in lock-step with account.ts.
-const syncDb = (key: string) => `materix-sync-${key}`;
+// SYNC store names go through the shared prefixed helpers (see idbUtil:
+// matrix-js-sdk prepends "matrix-js-sdk:" to the sync store's dbName, so raw
+// indexedDB ops must use the prefixed name). The rust-crypto databases are NOT
+// SDK sync stores and are therefore left UNPREFIXED — do not add IDB_PREFIX.
+const syncDb = (key: string) => syncDbName(key);
 const cryptoDb = (key: string) => `materix-crypto-${key}::matrix-sdk-crypto`;
 const cryptoMetaDb = (key: string) => `materix-crypto-${key}::matrix-sdk-crypto-meta`;
 
-// Fixed, deterministic archive slot (no timestamp/random — see task spec).
-const archivedSyncDb = (key: string) => `materix-sync-archived-${key}`;
+// Fixed, deterministic archive slot (no timestamp/random — see task spec). The
+// sync archive is likewise the prefixed name; the crypto archives stay unprefixed.
+const archivedSyncDb = (key: string) => archivedSyncDbName(key);
 const archivedCryptoDb = (key: string) => `materix-crypto-archived-${key}::matrix-sdk-crypto`;
 const archivedCryptoMetaDb = (key: string) => `materix-crypto-archived-${key}::matrix-sdk-crypto-meta`;
 

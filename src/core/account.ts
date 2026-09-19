@@ -17,6 +17,12 @@ import {
 } from "matrix-js-sdk";
 import { NonDestructiveIndexedDBStore } from "./nonDestructiveStore";
 import {
+  plainSyncDbName,
+  plainSyncDbSuffix,
+  syncDbName,
+  syncDbSuffix,
+} from "./idbUtil";
+import {
   archiveCanonicalStores,
   deleteCanonicalStores,
   detectCanonicalStoreCorruption,
@@ -218,11 +224,14 @@ export class MatrixAccount {
     // store subclass also makes the invariant absolute: it suppresses
     // matrix-js-sdk's auto-delete-on-degrade so an IndexedDB hiccup can never
     // wipe the on-disk store (see NonDestructiveIndexedDBStore).
+    // The SDK prepends "matrix-js-sdk:" to this dbName internally, so we hand it
+    // the UNPREFIXED suffix here (raw-indexedDB code in destroy()/storeMaintenance
+    // uses the prefixed form). Both come from the same idbUtil helpers.
     const store = new NonDestructiveIndexedDBStore({
       indexedDB: window.indexedDB,
       dbName: this.cryptoAvailable
-        ? `materix-sync-${this.key}`
-        : `materix-sync-plain-${this.key}`,
+        ? syncDbSuffix(this.key)
+        : plainSyncDbSuffix(this.key),
     });
     this.client.store = store;
     // Must run after the store is assigned to the client (SDK requirement).
@@ -998,9 +1007,11 @@ export class MatrixAccount {
     }
     // client.store only covers whichever sync namespace this session was bound
     // to; explicitly remove both, and both rust crypto dbs (clearStores() only
-    // knows the SDK's default crypto prefix, not ours).
-    indexedDB.deleteDatabase(`materix-sync-${this.key}`);
-    indexedDB.deleteDatabase(`materix-sync-plain-${this.key}`);
+    // knows the SDK's default crypto prefix, not ours). These are RAW indexedDB
+    // deletes, so the sync stores need the "matrix-js-sdk:" prefix the SDK adds
+    // (via idbUtil helpers); the rust-crypto dbs are unprefixed.
+    indexedDB.deleteDatabase(syncDbName(this.key));
+    indexedDB.deleteDatabase(plainSyncDbName(this.key));
     indexedDB.deleteDatabase(`materix-crypto-${this.key}::matrix-sdk-crypto`);
     indexedDB.deleteDatabase(`materix-crypto-${this.key}::matrix-sdk-crypto-meta`);
     // Wipe cached plaintext on sign-out (privacy: never outlive the session).
