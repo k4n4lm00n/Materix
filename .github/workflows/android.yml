@@ -193,10 +193,67 @@ jobs:
           cp "$(find src-tauri/gen/android/app/build/outputs/apk -name '*universal*release*.apk' | head -1)" dist-apks/materix-compat.apk
           ls -l dist-apks
 
+      - name: Guard — both variants exist and are correctly distinguished
+        # WHY THIS GUARD EXISTS: a past bad deploy shipped 0.2.0 built from a
+        # feature branch whose android.yml had dropped the `-compat` versionName
+        # suffix, so the compat APK carried the SAME versionName as the modern
+        # one. On old devices F-Droid then showed "0.2.0" with no -compat label
+        # and no way to distinguish the variants — and nothing failed the build.
+        # This step is the last thing before upload: it FAILS the job (so the
+        # artifact is never uploaded — see `if: success()` on the upload step
+        # below) unless BOTH APKs exist and are correctly distinguished:
+        #   modern -> minSdkVersion=31, NO maxSdkVersion, versionName NOT -compat
+        #   compat -> minSdkVersion=24, maxSdkVersion=30, versionName ends -compat
+        # Assertions read the built manifests via `aapt dump badging` (the SDK
+        # build-tools are preinstalled on the runner, same as fdroid-repo.yml).
+        run: |
+          set -euo pipefail
+          # Newest installed build-tools; `aapt` (not aapt2) prints `badging`.
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          AAPT="$BT/aapt"
+          test -x "$AAPT" || { echo "::error::aapt not found under $BT"; exit 1; }
+          fail() { echo "::error::$*"; exit 1; }
+          # `aapt dump badging` emits, among others:
+          #   sdkVersion:'NN'        (== minSdkVersion; always present)
+          #   maxSdkVersion:'NN'     (present ONLY when a maxSdk is declared)
+          #   package: ... versionName='...' ...
+          # Anchoring ^sdkVersion:/^maxSdkVersion: avoids matching targetSdk etc.
+          badge_min() { "$AAPT" dump badging "$1" | sed -n "s/^sdkVersion:'\([0-9]*\)'.*/\1/p" | head -1; }
+          badge_max() { "$AAPT" dump badging "$1" | sed -n "s/^maxSdkVersion:'\([0-9]*\)'.*/\1/p" | head -1; }
+          badge_vn()  { "$AAPT" dump badging "$1" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -1; }
+
+          MODERN=dist-apks/materix-modern.apk
+          COMPAT=dist-apks/materix-compat.apk
+          test -f "$MODERN" || fail "modern APK missing: $MODERN"
+          test -f "$COMPAT" || fail "compat APK missing: $COMPAT"
+
+          M_MIN="$(badge_min "$MODERN")"; M_MAX="$(badge_max "$MODERN")"; M_VN="$(badge_vn "$MODERN")"
+          C_MIN="$(badge_min "$COMPAT")"; C_MAX="$(badge_max "$COMPAT")"; C_VN="$(badge_vn "$COMPAT")"
+          echo "modern: minSdk=$M_MIN maxSdk=${M_MAX:-<none>} versionName=$M_VN"
+          echo "compat: minSdk=$C_MIN maxSdk=${C_MAX:-<none>} versionName=$C_VN"
+
+          # Modern must target new WebViews only and must NOT masquerade as compat.
+          [ "$M_MIN" = "31" ] || fail "modern minSdkVersion must be 31, got '${M_MIN:-<empty>}'"
+          [ -z "$M_MAX" ]     || fail "modern APK must NOT declare maxSdkVersion, got '$M_MAX'"
+          case "$M_VN" in *-compat) fail "modern versionName must NOT end in -compat: $M_VN";; esac
+
+          # Compat must cover old devices, be capped at Android 11, and be labeled.
+          [ "$C_MIN" = "24" ] || fail "compat minSdkVersion must be 24, got '${C_MIN:-<empty>}'"
+          [ "$C_MAX" = "30" ] || fail "compat maxSdkVersion must be 30, got '${C_MAX:-<empty>}'"
+          case "$C_VN" in
+            *-compat) : ;;
+            *) fail "compat versionName must end in -compat (mislabel incident guard): $C_VN";;
+          esac
+
+          echo "Guard passed: modern + compat APKs both present and correctly distinguished."
+
       - name: Upload APKs (modern + compat)
-        if: always()
+        # `if: success()` (was `always()`): only upload when the guard above
+        # passed. A broken or mislabeled build must never become a downloadable
+        # artifact that fdroid-repo.yml could later reuse and publish.
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: materix-android-apk
           path: dist-apks/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
