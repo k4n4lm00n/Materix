@@ -167,19 +167,30 @@ jobs:
           # Swap in the reference-types/multivalue-free crypto WASM so the crypto
           # engine runs on old System WebViews (Chromium ~83 / Android 11).
           bash scripts/apply-compat-wasm.sh
-          # Re-stamp for the compat variant: same versionName (F-Droid shows the
-          # same "0.2.0" whichever build a device gets), a higher versionCode (so
-          # on old devices F-Droid prefers it over the modern APK), and maxSdk=30
-          # so F-Droid only offers it to Android <= 11 (a proxy for "old WebView" —
-          # imperfect but the best F-Droid has). The two builds stay distinct in
-          # the repo via their versionCodes (in the filename) and maxSdk.
+          # Guard (catches a silently-failed swap BEFORE the build runs): confirm
+          # the installed crypto WASM now byte-matches the vendored compat build.
+          # A no-op swap here yields a "compat-labeled but stock-inside" APK --
+          # the exact class of failure behind the bad 0.2.0 deploy.
+          PKG="$(readlink -f node_modules/@matrix-org/matrix-sdk-crypto-wasm)/pkg"
+          VEND="packaging/compat-crypto-wasm/matrix_sdk_crypto_wasm_bg.wasm"
+          INST="$PKG/matrix_sdk_crypto_wasm_bg.wasm"
+          VH="$(sha256sum "$VEND" | cut -d' ' -f1)"
+          IH="$(sha256sum "$INST" | cut -d' ' -f1)"
+          [ "$VH" = "$IH" ] || { echo "::error::compat WASM swap did not take effect: installed $INST ($IH) != vendored $VEND ($VH)"; exit 1; }
+          echo "compat WASM swap verified: installed WASM matches vendored ($VH)"
+          # Re-stamp for the compat variant: a distinct versionName (-compat) — the
+          # end-of-build guard REQUIRES this suffix (mislabel-incident guard), and
+          # dropping it is the exact 0.2.0 regression — a higher versionCode (so on
+          # old devices F-Droid prefers it over the modern APK), and maxSdk=30 so
+          # F-Droid only offers it to Android <= 11 (a proxy for "old WebView" —
+          # imperfect but the best F-Droid has).
           GRADLE="src-tauri/gen/android/app/build.gradle.kts"
           python3 - "$GRADLE" "$BASE_VC" "$BASE_VN" <<'PY'
           import re, sys
           path, base_vc, base_vn = sys.argv[1], int(sys.argv[2]), sys.argv[3]
           s = open(path).read()
           s, n1 = re.subn(r'versionCode\s*=\s*[^\n]+', f'versionCode = {base_vc + 100000000}', s)
-          s, n2 = re.subn(r'versionName\s*=\s*[^\n]+', f'versionName = "{base_vn}"', s)
+          s, n2 = re.subn(r'versionName\s*=\s*[^\n]+', f'versionName = "{base_vn}-compat"', s)
           # Compat variant covers old devices: minSdk back to 24 (the modern stamp
           # set it to 31) and maxSdk=30 so F-Droid offers it only on Android <= 11.
           s, n3 = re.subn(r'minSdk\s*=\s*\d+', 'minSdk = 24', s)
@@ -187,16 +198,119 @@ jobs:
               s = re.sub(r'(minSdk\s*=\s*24)', r'\1\n        maxSdk = 30', s, count=1)
           assert n1 >= 1 and n2 >= 1 and n3 >= 1 and 'maxSdk = 30' in s, f"compat gradle patch failed: {n1} {n2} {n3}"
           open(path, 'w').write(s)
-          print(f"compat stamp: versionCode={base_vc + 100000000} versionName={base_vn} (compat) minSdk=24 maxSdk=30")
+          print(f"compat stamp: versionCode={base_vc + 100000000} versionName={base_vn}-compat minSdk=24 maxSdk=30")
           PY
           pnpm tauri android build --apk
           cp "$(find src-tauri/gen/android/app/build/outputs/apk -name '*universal*release*.apk' | head -1)" dist-apks/materix-compat.apk
           ls -l dist-apks
 
+      - name: Guard — both variants exist and are correctly distinguished
+        # WHY THIS GUARD EXISTS: a past bad deploy shipped 0.2.0 built from a
+        # feature branch whose android.yml had dropped the `-compat` versionName
+        # suffix, so the compat APK carried the SAME versionName as the modern
+        # one. On old devices F-Droid then showed "0.2.0" with no -compat label
+        # and no way to distinguish the variants — and nothing failed the build.
+        # This step is the last thing before upload: it FAILS the job (so the
+        # artifact is never uploaded — see `if: success()` on the upload step
+        # below) unless BOTH APKs exist and are correctly distinguished:
+        #   modern -> minSdkVersion=31, NO maxSdkVersion, versionName NOT -compat
+        #   compat -> minSdkVersion=24, maxSdkVersion=30, versionName ends -compat
+        # Assertions read the built manifests via `aapt dump badging` (the SDK
+        # build-tools are preinstalled on the runner, same as fdroid-repo.yml).
+        run: |
+          set -euo pipefail
+          # Newest installed build-tools; `aapt` (not aapt2) prints `badging`.
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          AAPT="$BT/aapt"
+          test -x "$AAPT" || { echo "::error::aapt not found under $BT"; exit 1; }
+          fail() { echo "::error::$*"; exit 1; }
+          # `aapt dump badging` emits, among others:
+          #   sdkVersion:'NN'        (== minSdkVersion; always present)
+          #   maxSdkVersion:'NN'     (present ONLY when a maxSdk is declared)
+          #   package: ... versionName='...' ...
+          # Anchoring ^sdkVersion:/^maxSdkVersion: avoids matching targetSdk etc.
+          badge_min() { "$AAPT" dump badging "$1" | sed -n "s/^sdkVersion:'\([0-9]*\)'.*/\1/p" | head -1; }
+          badge_max() { "$AAPT" dump badging "$1" | sed -n "s/^maxSdkVersion:'\([0-9]*\)'.*/\1/p" | head -1; }
+          badge_vn()  { "$AAPT" dump badging "$1" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -1; }
+
+          MODERN=dist-apks/materix-modern.apk
+          COMPAT=dist-apks/materix-compat.apk
+          test -f "$MODERN" || fail "modern APK missing: $MODERN"
+          test -f "$COMPAT" || fail "compat APK missing: $COMPAT"
+
+          M_MIN="$(badge_min "$MODERN")"; M_MAX="$(badge_max "$MODERN")"; M_VN="$(badge_vn "$MODERN")"
+          C_MIN="$(badge_min "$COMPAT")"; C_MAX="$(badge_max "$COMPAT")"; C_VN="$(badge_vn "$COMPAT")"
+          echo "modern: minSdk=$M_MIN maxSdk=${M_MAX:-<none>} versionName=$M_VN"
+          echo "compat: minSdk=$C_MIN maxSdk=${C_MAX:-<none>} versionName=$C_VN"
+
+          # Modern must target new WebViews only and must NOT masquerade as compat.
+          [ "$M_MIN" = "31" ] || fail "modern minSdkVersion must be 31, got '${M_MIN:-<empty>}'"
+          [ -z "$M_MAX" ]     || fail "modern APK must NOT declare maxSdkVersion, got '$M_MAX'"
+          case "$M_VN" in *-compat) fail "modern versionName must NOT end in -compat: $M_VN";; esac
+
+          # Compat must cover old devices, be capped at Android 11, and be labeled.
+          [ "$C_MIN" = "24" ] || fail "compat minSdkVersion must be 24, got '${C_MIN:-<empty>}'"
+          [ "$C_MAX" = "30" ] || fail "compat maxSdkVersion must be 30, got '${C_MAX:-<empty>}'"
+          case "$C_VN" in
+            *-compat) : ;;
+            *) fail "compat versionName must end in -compat (mislabel incident guard): $C_VN";;
+          esac
+
+          # THE COMPAT WASM ACTUALLY GOT SWAPPED IN (not just relabeled): the
+          # label checks above only prove the APK is *named* compat. A non-main
+          # build could skip/fail apply-compat-wasm.sh and ship a "compat-labeled
+          # but stock-inside" APK (the 0.2.0 class of bug). The swapped crypto
+          # WASM + JS glue are bundled into the Tauri frontend assets embedded in
+          # the native lib lib/<abi>/libapp_lib.so (lib name "app_lib" from
+          # src-tauri/Cargo.toml; confirmed present at that path for all four
+          # universal-APK ABIs), so a real swap MUST change that lib. Assert the
+          # compat lib differs from the modern lib for at least one shared ABI;
+          # identical across ALL ABIs means the swap did not take effect.
+          ABIS="arm64-v8a armeabi-v7a x86 x86_64"
+          LIB="libapp_lib.so"
+          # sha256 of empty input -> "lib absent from this APK" sentinel.
+          EMPTY="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          compared=0; differ=0
+          for ABI in $ABIS; do
+            P="lib/$ABI/$LIB"
+            # Hash straight from the zip stream -- nothing is written to disk.
+            # `|| true` keeps a missing entry from tripping pipefail/set -e.
+            MH="$(unzip -p "$MODERN" "$P" 2>/dev/null | sha256sum | cut -d' ' -f1 || true)"
+            CH="$(unzip -p "$COMPAT" "$P" 2>/dev/null | sha256sum | cut -d' ' -f1 || true)"
+            [ "$MH" = "$EMPTY" ] && MH=""
+            [ "$CH" = "$EMPTY" ] && CH=""
+            if [ -z "$MH" ] || [ -z "$CH" ]; then continue; fi   # ABI absent in one/both
+            compared=$((compared + 1))
+            if [ "$MH" = "$CH" ]; then
+              echo "::warning::$P identical in modern and compat ($MH) -- swap did not affect this ABI"
+            else
+              differ=$((differ + 1))
+              echo "$P differs (modern=$MH compat=$CH) -- swap took effect"
+            fi
+          done
+          [ "$compared" -ge 1 ] || fail "no shared $LIB ABI found in both APKs to compare (unexpected APK layout)"
+          [ "$differ" -ge 1 ] || fail "compat APK native lib is IDENTICAL to modern for ALL $compared ABI(s) -- crypto-WASM swap did NOT take effect (compat-labeled but stock-inside; the 0.2.0 class of bug)"
+          echo "Guard passed: modern + compat APKs present, correctly labeled, and compat WASM swap verified ($differ/$compared ABI native libs differ)."
+
+          # THE COMPAT CSP ALLOWS WASM ON OLD WEBVIEWS: 'wasm-unsafe-eval' is a
+          # Chromium 97+ keyword; on Cr<97 (the compat target) it is ignored and
+          # WASM codegen needs 'unsafe-eval'. apply-compat-wasm.sh adds it for the
+          # compat build only. dist/ is the compat frontend (compat builds last),
+          # so assert its baked CSP carries 'unsafe-eval' -- a missing suffix means
+          # the CSP patch silently no-op'd and crypto would be dead on old devices.
+          CSP_HTML="dist/index.html"
+          [ -f "$CSP_HTML" ] || fail "$CSP_HTML not found -- cannot verify the compat CSP"
+          grep -qF "script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'" "$CSP_HTML" \
+            || fail "compat $CSP_HTML CSP lacks 'unsafe-eval' in script-src -- WASM is blocked on Chromium <97 (apply-compat-wasm.sh did not patch the CSP)"
+          echo "Guard passed: compat CSP includes 'unsafe-eval' (WASM codegen allowed on old WebViews)."
+
       - name: Upload APKs (modern + compat)
-        if: always()
+        # `if: success()` (was `always()`): only upload when the guard above
+        # passed. A broken or mislabeled build must never become a downloadable
+        # artifact that fdroid-repo.yml could later reuse and publish.
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: materix-android-apk
           path: dist-apks/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error

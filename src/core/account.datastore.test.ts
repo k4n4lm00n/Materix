@@ -1,0 +1,233 @@
+// Regression tests for the data-safety invariant in MatrixAccount.start():
+// the crypto-backed store namespace (`materix-sync-<key>`) may only ever be
+// opened by a session whose crypto engine initialised; any crypto failure must
+// route to the separate clear-text `materix-sync-plain-<key>` namespace and
+// leave the crypto-backed one untouched. See the invariant block in account.ts.
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// ---- mocks ------------------------------------------------------------------
+
+const constructedStores: { dbName: string; startup: ReturnType<typeof vi.fn> }[] = [];
+
+const fakeClient = () => ({
+  on: vi.fn(),
+  off: vi.fn(),
+  initRustCrypto: vi.fn().mockResolvedValue(undefined),
+  startClient: vi.fn().mockResolvedValue(undefined),
+  stopClient: vi.fn(),
+  logout: vi.fn().mockResolvedValue(undefined),
+  clearStores: vi.fn().mockResolvedValue(undefined),
+  getAccountData: vi.fn().mockReturnValue(undefined),
+  store: undefined as unknown,
+});
+let client = fakeClient();
+
+vi.mock("matrix-js-sdk", () => ({
+  createClient: vi.fn(() => client),
+  BeaconEvent: {},
+  ClientEvent: {},
+  EventType: {},
+  MatrixEventEvent: {},
+  RoomEvent: {},
+  RoomMemberEvent: {},
+  RoomStateEvent: {},
+  SyncState: {},
+}));
+vi.mock("./nonDestructiveStore", () => ({
+  NonDestructiveIndexedDBStore: class {
+    dbName: string;
+    startup = vi.fn().mockResolvedValue(undefined);
+    deleteAllData = vi.fn().mockResolvedValue(undefined);
+    constructor(opts: { dbName: string }) {
+      this.dbName = opts.dbName;
+      constructedStores.push(this as never);
+    }
+  },
+}));
+vi.mock("./storeMaintenance", () => ({
+  detectCanonicalStoreCorruption: vi.fn().mockResolvedValue(false),
+  archiveCanonicalStores: vi.fn().mockResolvedValue(undefined),
+  deleteCanonicalStores: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("matrix-js-sdk/lib/crypto-api/CryptoEvent", () => ({ CryptoEvent: {} }));
+// account.ts transitively pulls roomHandle → markdown → DOMPurify, which needs
+// a real DOM; neither is exercised by these store-routing tests.
+vi.mock("./roomHandle", () => ({ RoomHandle: class {} }));
+vi.mock("./markdown", () => ({ previewText: (s: string) => s }));
+vi.mock("./crypto", () => ({
+  CryptoFacade: class {
+    bind = vi.fn();
+    attach = vi.fn();
+  },
+  cryptoCallbacks: {},
+}));
+vi.mock("./calls", () => ({
+  CallManager: class {
+    bind = vi.fn();
+  },
+}));
+vi.mock("./cryptoStoreKey", () => ({
+  readStorageKey: vi.fn().mockResolvedValue(null),
+  hasStorageKeyRecord: vi.fn().mockResolvedValue(false),
+}));
+
+import { MatrixAccount } from "./account";
+import { hasStorageKeyRecord, readStorageKey } from "./cryptoStoreKey";
+import {
+  archiveCanonicalStores,
+  deleteCanonicalStores,
+  detectCanonicalStoreCorruption,
+} from "./storeMaintenance";
+import type { SessionData } from "./types";
+
+const session: SessionData = {
+  userId: "@u:hs",
+  deviceId: "DEV",
+  accessToken: "tok",
+  homeserverUrl: "https://hs",
+};
+
+beforeEach(() => {
+  constructedStores.length = 0;
+  client = fakeClient();
+  vi.mocked(readStorageKey).mockResolvedValue(null);
+  vi.mocked(hasStorageKeyRecord).mockResolvedValue(false);
+  vi.mocked(detectCanonicalStoreCorruption).mockClear().mockResolvedValue(false);
+  vi.mocked(archiveCanonicalStores).mockClear().mockResolvedValue(undefined);
+  vi.mocked(deleteCanonicalStores).mockClear().mockResolvedValue(undefined);
+  const deleteDatabase = vi.fn();
+  (globalThis as Record<string, unknown>).indexedDB = { deleteDatabase };
+  (globalThis as Record<string, unknown>).window = globalThis;
+});
+
+// ---- tests ------------------------------------------------------------------
+
+describe("MatrixAccount.start data-store routing", () => {
+  it("crypto OK: opens exactly the canonical materix-sync-<key> store, after crypto init", async () => {
+    const acc = new MatrixAccount("k1", session);
+    await acc.start();
+
+    expect(acc.cryptoAvailable).toBe(true);
+    expect(constructedStores.map((s) => s.dbName)).toEqual(["materix-sync-k1"]);
+    expect(constructedStores[0].startup).toHaveBeenCalledOnce();
+    expect(client.store).toBe(constructedStores[0]);
+    // Namespace chosen after the crypto outcome: init ran before the store existed.
+    expect(client.initRustCrypto.mock.invocationCallOrder[0]).toBeLessThan(
+      constructedStores[0].startup.mock.invocationCallOrder[0],
+    );
+    expect(client.initRustCrypto).toHaveBeenCalledWith({ cryptoDatabasePrefix: "materix-crypto-k1" });
+    expect(client.startClient).toHaveBeenCalledOnce();
+  });
+
+  it("passes the at-rest storageKey through unchanged when one exists", async () => {
+    const key = new Uint8Array(32).fill(7) as Uint8Array<ArrayBuffer>;
+    vi.mocked(readStorageKey).mockResolvedValue(key);
+    vi.mocked(hasStorageKeyRecord).mockResolvedValue(true);
+    const acc = new MatrixAccount("k1", session);
+    await acc.start();
+
+    expect(client.initRustCrypto).toHaveBeenCalledWith({
+      cryptoDatabasePrefix: "materix-crypto-k1",
+      storageKey: key,
+    });
+    expect(constructedStores.map((s) => s.dbName)).toEqual(["materix-sync-k1"]);
+  });
+
+  it("crypto init failure: falls back to materix-sync-plain-<key>, never touching the canonical store", async () => {
+    client.initRustCrypto.mockRejectedValue(new Error("WebAssembly.instantiate: reference-types"));
+    const acc = new MatrixAccount("k1", session);
+    await acc.start();
+
+    expect(acc.cryptoAvailable).toBe(false);
+    expect(acc.cryptoError).toMatch(/reference-types/);
+    // THE invariant: only the plain fallback db is ever constructed/opened.
+    expect(constructedStores.map((s) => s.dbName)).toEqual(["materix-sync-plain-k1"]);
+    expect(constructedStores[0].startup).toHaveBeenCalledOnce();
+    // App still runs (unencrypted) against the fallback store.
+    expect(client.startClient).toHaveBeenCalledOnce();
+    // Nothing was deleted.
+    const idb = (globalThis as Record<string, unknown>).indexedDB as { deleteDatabase: ReturnType<typeof vi.fn> };
+    expect(idb.deleteDatabase).not.toHaveBeenCalled();
+  });
+
+  it("locked at-rest key: refuses to open the encrypted crypto store keyless and falls back", async () => {
+    vi.mocked(readStorageKey).mockResolvedValue(null); // unlock cancelled / unreadable
+    vi.mocked(hasStorageKeyRecord).mockResolvedValue(true); // ...but a key record exists
+    const acc = new MatrixAccount("k1", session);
+    await acc.start();
+
+    // The encrypted crypto store must not even be opened without its key.
+    expect(client.initRustCrypto).not.toHaveBeenCalled();
+    expect(acc.cryptoAvailable).toBe(false);
+    expect(constructedStores.map((s) => s.dbName)).toEqual(["materix-sync-plain-k1"]);
+  });
+
+  it("destroy (explicit sign-out) is the only deletion path and removes both namespaces", async () => {
+    const acc = new MatrixAccount("k1", session);
+    await acc.start();
+    await acc.destroy();
+
+    const idb = (globalThis as Record<string, unknown>).indexedDB as { deleteDatabase: ReturnType<typeof vi.fn> };
+    const deleted = idb.deleteDatabase.mock.calls.map((c) => c[0]);
+    expect(deleted).toEqual(
+      expect.arrayContaining([
+        // Sync stores are deleted by their SDK-prefixed real name...
+        "matrix-js-sdk:materix-sync-k1",
+        "matrix-js-sdk:materix-sync-plain-k1",
+        // ...the rust-crypto dbs are unprefixed.
+        "materix-crypto-k1::matrix-sdk-crypto",
+        "materix-crypto-k1::matrix-sdk-crypto-meta",
+      ]),
+    );
+  });
+});
+
+describe("MatrixAccount corruption detection + recovery", () => {
+  it("crypto OK: never probes for corruption (canonical store opened cleanly)", async () => {
+    const acc = new MatrixAccount("k1", session);
+    await acc.start();
+    expect(detectCanonicalStoreCorruption).not.toHaveBeenCalled();
+    expect(acc.storeCorruption).toBe(false);
+  });
+
+  it("crypto failed + probe flags divergence: sets storeCorruption, but moves/deletes NOTHING", async () => {
+    client.initRustCrypto.mockRejectedValue(new Error("wasm"));
+    vi.mocked(detectCanonicalStoreCorruption).mockResolvedValue(true);
+    const acc = new MatrixAccount("k1", session);
+    await acc.start();
+
+    expect(detectCanonicalStoreCorruption).toHaveBeenCalledWith("k1");
+    expect(acc.storeCorruption).toBe(true);
+    // Detection is READ-ONLY: no archive, no delete until the user chooses.
+    expect(archiveCanonicalStores).not.toHaveBeenCalled();
+    expect(deleteCanonicalStores).not.toHaveBeenCalled();
+    const idb = (globalThis as Record<string, unknown>).indexedDB as { deleteDatabase: ReturnType<typeof vi.fn> };
+    expect(idb.deleteDatabase).not.toHaveBeenCalled();
+    // App still ran on the clear-text fallback.
+    expect(constructedStores.map((s) => s.dbName)).toEqual(["materix-sync-plain-k1"]);
+  });
+
+  it("archiveCorruptedStore() archives then clears the flag", async () => {
+    client.initRustCrypto.mockRejectedValue(new Error("wasm"));
+    vi.mocked(detectCanonicalStoreCorruption).mockResolvedValue(true);
+    const acc = new MatrixAccount("k1", session);
+    await acc.start();
+    await acc.archiveCorruptedStore();
+
+    expect(archiveCanonicalStores).toHaveBeenCalledWith("k1");
+    expect(deleteCanonicalStores).not.toHaveBeenCalled();
+    expect(acc.storeCorruption).toBe(false);
+  });
+
+  it("deleteCorruptedStore() deletes then clears the flag", async () => {
+    client.initRustCrypto.mockRejectedValue(new Error("wasm"));
+    vi.mocked(detectCanonicalStoreCorruption).mockResolvedValue(true);
+    const acc = new MatrixAccount("k1", session);
+    await acc.start();
+    await acc.deleteCorruptedStore();
+
+    expect(deleteCanonicalStores).toHaveBeenCalledWith("k1");
+    expect(archiveCanonicalStores).not.toHaveBeenCalled();
+    expect(acc.storeCorruption).toBe(false);
+  });
+});
