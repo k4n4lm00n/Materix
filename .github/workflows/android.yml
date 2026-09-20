@@ -292,6 +292,18 @@ jobs:
           [ "$differ" -ge 1 ] || fail "compat APK native lib is IDENTICAL to modern for ALL $compared ABI(s) -- crypto-WASM swap did NOT take effect (compat-labeled but stock-inside; the 0.2.0 class of bug)"
           echo "Guard passed: modern + compat APKs present, correctly labeled, and compat WASM swap verified ($differ/$compared ABI native libs differ)."
 
+          # THE COMPAT CSP ALLOWS WASM ON OLD WEBVIEWS: 'wasm-unsafe-eval' is a
+          # Chromium 97+ keyword; on Cr<97 (the compat target) it is ignored and
+          # WASM codegen needs 'unsafe-eval'. apply-compat-wasm.sh adds it for the
+          # compat build only. dist/ is the compat frontend (compat builds last),
+          # so assert its baked CSP carries 'unsafe-eval' -- a missing suffix means
+          # the CSP patch silently no-op'd and crypto would be dead on old devices.
+          CSP_HTML="dist/index.html"
+          [ -f "$CSP_HTML" ] || fail "$CSP_HTML not found -- cannot verify the compat CSP"
+          grep -qF "script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'" "$CSP_HTML" \
+            || fail "compat $CSP_HTML CSP lacks 'unsafe-eval' in script-src -- WASM is blocked on Chromium <97 (apply-compat-wasm.sh did not patch the CSP)"
+          echo "Guard passed: compat CSP includes 'unsafe-eval' (WASM codegen allowed on old WebViews)."
+
       - name: Upload APKs (modern + compat)
         # `if: success()` (was `always()`): only upload when the guard above
         # passed. A broken or mislabeled build must never become a downloadable
