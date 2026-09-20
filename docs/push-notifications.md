@@ -143,6 +143,84 @@ UnifiedPush endpoint URL, and `data.url` is the ntfy Matrix gateway.
 
 ---
 
+## Grouping & counts
+
+Materix bundles Android message notifications **per account** with a running
+count, instead of one system notification per message.
+
+### Why this needs native code
+
+The stock `@tauri-apps/plugin-notification` can't produce correct messenger
+grouping on Android:
+
+- it hardcodes `setOnlyAlertOnce(true)`, so every message after the first would
+  be **silent** on a stable/updated notification, and
+- it never applies `number`, so there's **no count badge**.
+
+So the live path posts through the native layer we already own
+(`packaging/android/push/MaterixPush.kt`, injected by
+`scripts/apply-android-push.sh`) via the `window.MaterixPushNative` bridge.
+Desktop (plugin) and web (`new Notification` with a per-room `tag`) are
+unchanged.
+
+### Live path (app alive) — the grouped notifier
+
+Element-style: **one group per account**, one **child** notification per room,
+and one **group summary** per account.
+
+- The Kotlin side is **stateless** — it just renders. JS
+  (`src/ui/notifications.ts`, with the pure reducer in
+  `src/ui/notifyGrouping.ts`) owns a per-account / per-room tally of messages
+  notified **since the room was last viewed**, and sends the *complete* desired
+  state (`notifyMessage`) on every post:
+
+  ```jsonc
+  {
+    "accountKey":   "…",          // group key = "acct.<accountKey>"
+    "accountLabel": "@me:hs",     // summary title / subtext
+    "roomId":       "!room:hs",   // child id = stableId("room.<acct>.<roomId>")
+    "channelId":    "acct.…",     // per-room override or per-account channel
+    "title":        "alice · #room",
+    "body":         "latest text",
+    "roomLines":    ["alice: hi", "alice: there"],  // ≤5, child InboxStyle
+    "roomCount":    2,            // child number badge
+    "accountLines": ["alice: hi", "alice: there"],  // ≤7, summary InboxStyle
+    "totalCount":   2             // summary number badge + "N new messages"
+  }
+  ```
+
+- Children re-alert on every message (`setOnlyAlertOnce(false)`); the summary
+  updates silently (`setOnlyAlertOnce(true)`). Sound/importance still come from
+  the per-account (`acct.<key>`) or per-room (`room.<key>.<roomId>`) channel, so
+  per-room sound overrides keep working.
+- **Clearing:** opening a room zeroes its tally and sends `clearRoom`
+  (`{ accountKey, roomId, remainingTotal, accountLines, channelId }`): the child
+  is cancelled and the summary is either re-posted with the remainder or
+  cancelled when the account hits zero.
+- **Tap:** a child carries `materix.roomId` / `materix.accountKey` extras;
+  `MainActivity.onNewIntent` (patched in by the apply script) forwards them as a
+  `materix-notif-open` event and `src/ui/push.ts` deep-links into the room.
+- **Privacy** is honored exactly as the legacy notifier: in "name" mode the
+  lines are the sender only (no message content ever reaches a line); in
+  "preview" mode they are `sender: body`. No decrypted content is persisted
+  anywhere — the tally lives only in memory.
+- Feature-detected: if the native bridge is absent (dev build / sideload without
+  the apply script) or throws, JS falls back to the plain plugin
+  `sendNotification` unchanged.
+
+### Dead-process path (app killed) — running count
+
+The `event_id_only` push carries no content and no account attribution (all
+accounts share one UnifiedPush endpoint), so this path stays a single
+**standalone** notification on stable id `1` that each push replaces. It is now
+upgraded to show the homeserver's **`counts.unread`** total as "N new messages"
+with a count badge, when the (spec-optional) field is present — otherwise it
+falls back to the plain "New message". It is not grouped (the account is
+unknown here) and is cleared when the app opens (`attach()` cancels id 1); the
+live sync then posts the rich grouped block.
+
+---
+
 ## Troubleshooting
 
 - **"Turn on" is greyed out** → no UnifiedPush distributor is installed. Install

@@ -16,9 +16,10 @@ import { accountManager } from "../core/manager";
 import { registerUnifiedPushPusher, removeUnifiedPushPushers } from "../core/push";
 import { getPrefs, setPref } from "./prefs";
 import { isAndroid } from "./notifyChannels";
+import { uiBus } from "./bus";
 
 /** The native bridge, injected as `window.MaterixPushNative` by MaterixPush.kt. */
-interface MaterixPushNative {
+export interface MaterixPushNative {
   ping(): boolean;
   /** JSON: [{ id: string, name: string }]. */
   getDistributors(): string;
@@ -40,6 +41,16 @@ interface MaterixPushNative {
   // Battery-optimization exemption.
   isIgnoringBatteryOptimizations(): boolean;
   requestIgnoreBatteryOptimizations(): void;
+  // Grouped in-app notifications (see src/ui/notifications.ts + notifyGrouping.ts).
+  // All optional — absent on older native bridge builds, so callers
+  // feature-detect before use.
+  /** Post/replace a room child + its account group-summary from a JSON payload
+   * (NotifyMessagePayload). */
+  notifyMessage?(json: string): void;
+  /** Cancel a room's child and re-post/cancel its summary (ClearRoomPayload). */
+  clearRoom?(json: string): void;
+  /** Cancel a whole account's group summary (e.g. on sign-out). */
+  clearAccount?(accountKey: string): void;
 }
 
 function native(): MaterixPushNative | null {
@@ -142,6 +153,21 @@ function wireListeners(): void {
 
   window.addEventListener("materix-up-unregistered", () => {
     void removePushersForAll();
+  });
+
+  // A grouped notification was tapped: MainActivity.onNewIntent (patched in by
+  // apply-android-push.sh) dispatches this with { roomId, accountKey } so we can
+  // deep-link straight into the room via the app command bus.
+  window.addEventListener("materix-notif-open", (e) => {
+    try {
+      const { roomId, accountKey } = JSON.parse((e as CustomEvent<string>).detail) as {
+        roomId?: string;
+        accountKey?: string;
+      };
+      if (roomId && accountKey) uiBus.openRoom({ accountKey, roomId });
+    } catch {
+      // malformed payload — ignore
+    }
   });
 }
 

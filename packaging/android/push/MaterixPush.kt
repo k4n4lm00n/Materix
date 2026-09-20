@@ -21,13 +21,16 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import androidx.core.app.NotificationCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.ref.WeakReference
+import java.security.MessageDigest
 import org.unifiedpush.android.connector.UnifiedPush
 
 object MaterixPush {
@@ -46,6 +49,13 @@ object MaterixPush {
     fun attach(activity: Activity, webView: WebView) {
         webViewRef = WeakReference(webView)
         webView.addJavascriptInterface(MaterixPushBridge(activity), "MaterixPushNative")
+        // The app is alive now: retire the dead-process generic notification
+        // (stable id 1). The live JS path re-posts the rich grouped block.
+        try {
+            val nm = activity.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(1)
+        } catch (_: Throwable) {
+        }
     }
 
     /** True when a live WebView can handle the push in JS (app is running). */
@@ -81,25 +91,20 @@ object MaterixPush {
         }
     }
 
-    /** Post a minimal "new message" notification — the dead-process fallback. */
+    /**
+     * Post a minimal "new message" notification — the dead-process fallback.
+     * When the gateway payload carried `counts.unread` we upgrade the text to
+     * "N new messages" and set the count badge. Standalone (no group): the
+     * account is unknown in this path (all accounts share one UnifiedPush
+     * endpoint), so it cannot join the per-account live group. Stable id 1 —
+     * each push REPLACES it — and retired on app open (attach()).
+     */
     @SuppressLint("MissingPermission")
-    fun notifyGeneric(context: Context, title: String, body: String) {
-        if (Build.VERSION.SDK_INT >= 33 &&
-            context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            return
-        }
+    fun notifyGeneric(context: Context, title: String, body: String, unread: Int? = null) {
+        if (!canPost(context)) return
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= 26 && nm.getNotificationChannel(CHANNEL_ID) == null) {
-            nm.createNotificationChannel(
-                NotificationChannel(
-                    CHANNEL_ID,
-                    "Background messages",
-                    NotificationManager.IMPORTANCE_HIGH,
-                ).apply { description = "New messages received while Materix was closed" },
-            )
-        }
+        ensureChannel(nm, CHANNEL_ID)
+        val text = if (unread != null && unread > 1) "$unread new messages" else body
         val builder = if (Build.VERSION.SDK_INT >= 26) {
             Notification.Builder(context, CHANNEL_ID)
         } else {
@@ -107,15 +112,209 @@ object MaterixPush {
         }
         builder
             .setContentTitle(title)
-            .setContentText(body)
+            .setContentText(text)
             .setSmallIcon(context.applicationInfo.icon)
             .setAutoCancel(true)
+        if (unread != null && unread > 0) builder.setNumber(unread)
         context.packageManager.getLaunchIntentForPackage(context.packageName)?.let { launch ->
             val flags = PendingIntent.FLAG_UPDATE_CURRENT or
                 (if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
             builder.setContentIntent(PendingIntent.getActivity(context, 0, launch, flags))
         }
         nm.notify(1, builder.build())
+    }
+
+    // --- Grouped in-app notifier (live path) -------------------------------
+    // STATELESS renderer: JS (src/ui/notifications.ts + notifyGrouping.ts) owns
+    // the running "since last viewed" tally and hands us the COMPLETE desired
+    // state — child (room) + account summary — on every post. We only render.
+
+    /** Deterministic positive-ish 32-bit id from a string (first 4 bytes of
+     * SHA-256). Avoids String.hashCode() collisions across the ids we post. */
+    fun stableId(key: String): Int {
+        val d = MessageDigest.getInstance("SHA-256").digest(key.toByteArray(Charsets.UTF_8))
+        return ((d[0].toInt() and 0xFF) shl 24) or
+            ((d[1].toInt() and 0xFF) shl 16) or
+            ((d[2].toInt() and 0xFF) shl 8) or
+            (d[3].toInt() and 0xFF)
+    }
+
+    /**
+     * Post/replace a room's child notification and its per-account group
+     * summary. Payload (JSON from JS):
+     *   { accountKey, accountLabel, roomId, channelId?, title, body,
+     *     roomLines: [..], roomCount, accountLines: [..], totalCount }
+     */
+    @SuppressLint("MissingPermission")
+    fun notifyMessage(context: Context, json: String) {
+        if (!canPost(context)) return
+        val o = try {
+            JSONObject(json)
+        } catch (_: Throwable) {
+            return
+        }
+        val accountKey = o.optString("accountKey")
+        val roomId = o.optString("roomId")
+        if (accountKey.isEmpty() || roomId.isEmpty()) return
+
+        val channelId = o.optString("channelId").takeIf { it.isNotEmpty() } ?: CHANNEL_ID
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        ensureChannel(nm, channelId)
+
+        val groupKey = "acct.$accountKey"
+        val childId = stableId("room.$accountKey.$roomId")
+        val summaryId = stableId("acct.$accountKey")
+        val icon = context.applicationInfo.icon
+
+        val title = o.optString("title")
+        val body = o.optString("body")
+        val roomLines = jsonStrings(o.optJSONArray("roomLines"))
+        val roomCount = o.optInt("roomCount", roomLines.size)
+
+        val childStyle = NotificationCompat.InboxStyle()
+        for (l in roomLines) childStyle.addLine(l)
+        val child = NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(icon)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(childStyle)
+            .setGroup(groupKey)
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(false) // re-alert on every message (messenger default)
+            .setNumber(roomCount)
+            .setContentIntent(roomIntent(context, accountKey, roomId, childId))
+            .build()
+
+        nm.notify(childId, child)
+        nm.notify(summaryId, buildSummary(context, o, channelId, summaryId, icon))
+    }
+
+    /**
+     * A room was viewed: cancel its child; if the account has nothing left
+     * cancel the summary, otherwise re-post it with the recomputed remainder.
+     * Payload: { accountKey, accountLabel, roomId, remainingTotal,
+     *            accountLines: [..], channelId? }
+     */
+    @SuppressLint("MissingPermission")
+    fun clearRoom(context: Context, json: String) {
+        val o = try {
+            JSONObject(json)
+        } catch (_: Throwable) {
+            return
+        }
+        val accountKey = o.optString("accountKey")
+        val roomId = o.optString("roomId")
+        if (accountKey.isEmpty() || roomId.isEmpty()) return
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.cancel(stableId("room.$accountKey.$roomId"))
+
+        val summaryId = stableId("acct.$accountKey")
+        val remainingTotal = o.optInt("remainingTotal", 0)
+        if (remainingTotal <= 0) {
+            nm.cancel(summaryId)
+            return
+        }
+        if (!canPost(context)) return
+        val channelId = o.optString("channelId").takeIf { it.isNotEmpty() } ?: CHANNEL_ID
+        ensureChannel(nm, channelId)
+        nm.notify(summaryId, buildSummary(context, o, channelId, summaryId, context.applicationInfo.icon))
+    }
+
+    /** Cancel a whole account's group summary (e.g. sign-out). Children clear
+     * individually via clearRoom; JS drives that per room. */
+    fun clearAccount(context: Context, accountKey: String) {
+        if (accountKey.isEmpty()) return
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.cancel(stableId("acct.$accountKey"))
+    }
+
+    /** Build the per-account group-summary from the shared payload fields
+     * (accountLabel, totalCount, accountLines). */
+    private fun buildSummary(
+        context: Context,
+        o: JSONObject,
+        channelId: String,
+        summaryId: Int,
+        icon: Int,
+    ): Notification {
+        val accountKey = o.optString("accountKey")
+        val accountLabel = o.optString("accountLabel").takeIf { it.isNotEmpty() } ?: "Materix"
+        // notifyMessage payloads carry "totalCount"; clearRoom re-post payloads
+        // carry "remainingTotal" — accept either so the summary badge is correct
+        // in both paths (both mean "messages still pending for this account").
+        val totalCount = o.optInt("totalCount", o.optInt("remainingTotal", 0))
+        val accountLines = jsonStrings(o.optJSONArray("accountLines"))
+        val countText = "$totalCount new messages"
+        val style = NotificationCompat.InboxStyle().setSummaryText(countText)
+        for (l in accountLines) style.addLine(l)
+        return NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(icon)
+            .setContentTitle(accountLabel)
+            .setContentText(countText)
+            .setSubText(accountLabel)
+            .setStyle(style)
+            .setGroup("acct.$accountKey")
+            .setGroupSummary(true)
+            .setNumber(totalCount)
+            .setOnlyAlertOnce(true) // summary updates never double-alert
+            .setAutoCancel(true)
+            .setContentIntent(launchIntent(context, summaryId))
+            .build()
+    }
+
+    /** Launch intent carrying the room deep-link extras (MainActivity.onNewIntent). */
+    private fun roomIntent(
+        context: Context,
+        accountKey: String,
+        roomId: String,
+        requestCode: Int,
+    ): PendingIntent? {
+        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: return null
+        launch.putExtra("materix.roomId", roomId)
+        launch.putExtra("materix.accountKey", accountKey)
+        launch.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+            (if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
+        return PendingIntent.getActivity(context, requestCode, launch, flags)
+    }
+
+    /** Plain launch intent (summary tap → open the app). */
+    private fun launchIntent(context: Context, requestCode: Int): PendingIntent? {
+        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: return null
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+            (if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
+        return PendingIntent.getActivity(context, requestCode, launch, flags)
+    }
+
+    /** POST_NOTIFICATIONS gate (API 33+). */
+    private fun canPost(context: Context): Boolean =
+        Build.VERSION.SDK_INT < 33 ||
+            context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+
+    /** Idempotently create a high-importance channel (no-op pre-26). */
+    private fun ensureChannel(nm: NotificationManager, channelId: String) {
+        if (Build.VERSION.SDK_INT >= 26 && nm.getNotificationChannel(channelId) == null) {
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    channelId,
+                    "Background messages",
+                    NotificationManager.IMPORTANCE_HIGH,
+                ).apply { description = "New messages received while Materix was closed" },
+            )
+        }
+    }
+
+    private fun jsonStrings(arr: JSONArray?): List<String> {
+        if (arr == null) return emptyList()
+        val out = ArrayList<String>(arr.length())
+        for (i in 0 until arr.length()) {
+            val s = arr.optString(i, "")
+            if (s.isNotEmpty()) out.add(s)
+        }
+        return out
     }
 
     // request code exposed for MaterixPushBridge
@@ -131,6 +330,33 @@ class MaterixPushBridge(activity: Activity) {
     /** Presence probe — JS uses this to detect the native bridge exists. */
     @JavascriptInterface
     fun ping(): Boolean = true
+
+    // --- Grouped notifications (see src/ui/notifications.ts) ----------------
+    // Strings only across the JS bridge; the payloads are JSON (parsed natively).
+
+    @JavascriptInterface
+    fun notifyMessage(json: String) {
+        try {
+            MaterixPush.notifyMessage(appContext, json)
+        } catch (_: Throwable) {
+        }
+    }
+
+    @JavascriptInterface
+    fun clearRoom(json: String) {
+        try {
+            MaterixPush.clearRoom(appContext, json)
+        } catch (_: Throwable) {
+        }
+    }
+
+    @JavascriptInterface
+    fun clearAccount(accountKey: String) {
+        try {
+            MaterixPush.clearAccount(appContext, accountKey)
+        } catch (_: Throwable) {
+        }
+    }
 
     /** JSON array of installed distributors: [{ "id": <pkg>, "name": <label> }]. */
     @JavascriptInterface
