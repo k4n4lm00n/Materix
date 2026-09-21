@@ -119,6 +119,44 @@ jobs:
           github-token: ${{ github.token }}
           path: prebuilt
 
+      - name: Guard — reused artifact must contain BOTH modern and -compat APKs
+        # WHY THIS GUARD EXISTS: a past bad deploy shipped 0.2.0 built from a
+        # feature branch whose android.yml had dropped the `-compat` versionName
+        # suffix — the compat APK carried the same semver as the modern one, so
+        # the old device's F-Droid showed "0.2.0" with no -compat label and no
+        # guard stopped a modern-only / mislabeled artifact from being published.
+        # This is the "both-or-nothing" PUBLISH gate: refuse to sign, index, or
+        # deploy unless the reused artifact contains a properly-labeled compat
+        # APK (versionName ending in -compat, maxSdkVersion=30) ALONGSIDE a
+        # non-compat modern APK. Runs before any restore/sign work so it fails
+        # fast. android.yml has its own build-time guard; this one additionally
+        # protects publishes that reuse an artifact from any (older) build.
+        run: |
+          set -euo pipefail
+          # Newest installed build-tools (ANDROID_HOME is preinstalled on the
+          # ubuntu runner — same lookup the sign step below already uses).
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          AAPT="$BT/aapt"
+          test -x "$AAPT" || { echo "::error::aapt not found under $BT"; exit 1; }
+          mapfile -t APKS < <(find prebuilt -name '*.apk' | sort)
+          [ "${#APKS[@]}" -gt 0 ] || { echo "::error::No APK in the reused artifact"; exit 1; }
+          modern_count=0; compat_count=0; compat_max_ok=0
+          for APK in "${APKS[@]}"; do
+            # versionName='...'; maxSdkVersion:'NN' only present when declared.
+            VN="$("$AAPT" dump badging "$APK" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -1)"
+            MAX="$("$AAPT" dump badging "$APK" | sed -n "s/^maxSdkVersion:'\([0-9]*\)'.*/\1/p" | head -1)"
+            [ -n "$VN" ] || { echo "::error::Could not read versionName from $APK"; exit 1; }
+            echo "artifact APK: $(basename "$APK") versionName=$VN maxSdk=${MAX:-<none>}"
+            case "$VN" in
+              *-compat) compat_count=$((compat_count+1)); [ "$MAX" = "30" ] && compat_max_ok=$((compat_max_ok+1)) || true ;;
+              *)        modern_count=$((modern_count+1)) ;;
+            esac
+          done
+          [ "$modern_count" -ge 1 ] || { echo "::error::No modern APK (versionName without -compat) in artifact — refusing to publish a compat-only build"; exit 1; }
+          [ "$compat_count" -ge 1 ] || { echo "::error::No -compat APK in artifact — refusing to publish a modern-only/mislabeled build (see the 0.2.0 mislabel incident)"; exit 1; }
+          [ "$compat_max_ok" -ge 1 ] || { echo "::error::-compat APK does not declare maxSdkVersion=30 — F-Droid would offer it to modern devices; refusing to publish"; exit 1; }
+          echo "Publish guard passed: $modern_count modern + $compat_count compat APK(s); compat maxSdkVersion=30 verified."
+
       - name: Restore already-published versions (enables downgrade)
         if: ${{ inputs.reset_repo != 'true' }}
         run: |
